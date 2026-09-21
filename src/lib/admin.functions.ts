@@ -17,8 +17,10 @@ import type {
   HealthItem,
   KnowledgeBase,
   Model,
+  ModelStatus,
   ModelWithProvider,
   Provider,
+  QuotaInfo,
   Role,
   UsageEvent,
   Workflow,
@@ -46,6 +48,10 @@ export const requireAdmin = createMiddleware({ type: "function" })
 async function adminClient() {
   const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
   return supabaseAdmin;
+}
+
+async function loadOps() {
+  return import("@/lib/admin-ops.server");
 }
 
 // --- session -----------------------------------------------------------------
@@ -305,10 +311,15 @@ export const listModels = createServerFn({ method: "GET" })
       "id" | "name" | "slug" | "enabled" | "secret_ref"
     >[];
     const byId = new Map(providers.map((p) => [p.id, p]));
-    return ((modelsRes.data ?? []) as unknown as Model[]).map((m) => ({
-      ...m,
-      provider: byId.get(m.provider_id) ?? null,
-    }));
+    return ((modelsRes.data ?? []) as unknown as Model[]).map((m) => {
+      const provider = byId.get(m.provider_id) ?? null;
+      const status: ModelStatus = !m.enabled
+        ? "disabled"
+        : !provider?.enabled || !provider.secret_ref
+          ? "provider_unavailable"
+          : "enabled";
+      return { ...m, provider, status };
+    });
   });
 
 export const getModel = createServerFn({ method: "GET" })
@@ -329,10 +340,13 @@ export const getModel = createServerFn({ method: "GET" })
       .select("id, name, slug, enabled, secret_ref")
       .eq("id", typed.provider_id)
       .maybeSingle();
-    return {
-      ...typed,
-      provider: (providerRes.data as unknown as ModelWithProvider["provider"]) ?? null,
-    };
+    const provider = (providerRes.data as unknown as ModelWithProvider["provider"]) ?? null;
+    const status: ModelStatus = !typed.enabled
+      ? "disabled"
+      : !provider?.enabled || !provider.secret_ref
+        ? "provider_unavailable"
+        : "enabled";
+    return { ...typed, provider, status };
   });
 
 // --- workflows ---------------------------------------------------------------
@@ -444,4 +458,310 @@ export const getUsageSummary = createServerFn({ method: "GET" })
       totalCost,
       byCapability: [...map.entries()].map(([capability, v]) => ({ capability, ...v })),
     };
+  });
+
+// =============================================================================
+// Phase 2 — writes, connection tests, quotas
+//
+// Every mutation re-reads the target server-side, applies only the provided
+// fields, records an audit entry in activity_events, and returns a small status
+// object. No secret value is ever read into a response or written to the DB.
+// =============================================================================
+
+// --- provider write + test ---------------------------------------------------
+
+export const updateProvider = createServerFn({ method: "POST" })
+  .middleware([requireAdmin])
+  .inputValidator((input: unknown) =>
+    z
+      .object({
+        providerId: z.string(),
+        enabled: z.boolean().optional(),
+        secretRef: z.string().max(200).nullable().optional(),
+        secretSource: z.enum(["cloudflare_env", "supabase_vault"]).optional(),
+      })
+      .parse(input),
+  )
+  .handler(async ({ context, data }) => {
+    const db = await adminClient();
+    const { data: existing, error: readError } = await db
+      .from("providers")
+      .select("id")
+      .eq("id", data.providerId)
+      .maybeSingle();
+    if (readError) throw new Error(readError.message);
+    if (!existing) throw new Error("Provider 不存在");
+
+    const patch: Record<string, unknown> = {};
+    if (data.enabled !== undefined) patch["enabled"] = data.enabled;
+    if (data.secretRef !== undefined) patch["secret_ref"] = data.secretRef?.trim() || null;
+    if (data.secretSource !== undefined) patch["secret_source"] = data.secretSource;
+
+    const ops = await loadOps();
+    let result: "ok" | "error" = "ok";
+    let detail = "无变更";
+    if (Object.keys(patch).length > 0) {
+      const { error } = await db.from("providers").update(patch).eq("id", data.providerId);
+      if (error) {
+        result = "error";
+        detail = error.message;
+      } else {
+        detail = Object.keys(patch).join(", ");
+      }
+    }
+    await ops.recordAdminAction(db, {
+      actorUserId: context.userId,
+      action: "update_provider",
+      targetType: "provider",
+      targetId: data.providerId,
+      result,
+      detail,
+    });
+    if (result === "error") throw new Error(detail);
+    return { ok: true, changed: detail };
+  });
+
+export const testProviderConnection = createServerFn({ method: "POST" })
+  .middleware([requireAdmin])
+  .inputValidator((input: unknown) => z.object({ providerId: z.string() }).parse(input))
+  .handler(async ({ context, data }) => {
+    const db = await adminClient();
+    const { data: provider, error } = await db
+      .from("providers")
+      .select("*")
+      .eq("id", data.providerId)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!provider) throw new Error("Provider 不存在");
+
+    const ops = await loadOps();
+    const result = await ops.testProvider(provider as unknown as Provider);
+    await ops.recordAdminAction(db, {
+      actorUserId: context.userId,
+      action: "test_provider_connection",
+      targetType: "provider",
+      targetId: data.providerId,
+      result: result.success ? "ok" : "error",
+      detail: result.message,
+    });
+    return result;
+  });
+
+// --- model write -------------------------------------------------------------
+
+export const updateModel = createServerFn({ method: "POST" })
+  .middleware([requireAdmin])
+  .inputValidator((input: unknown) =>
+    z
+      .object({
+        modelId: z.string(),
+        displayName: z.string().min(1).max(120).optional(),
+        modelKey: z.string().min(1).max(60).optional(),
+        upstreamId: z.string().min(1).max(160).optional(),
+        description: z.string().max(2000).optional(),
+        enabled: z.boolean().optional(),
+        capabilities: z.array(z.string().max(40)).max(20).optional(),
+        slots: z.array(z.string().max(40)).max(20).optional(),
+      })
+      .parse(input),
+  )
+  .handler(async ({ context, data }) => {
+    const db = await adminClient();
+    const { data: existing, error: readError } = await db
+      .from("models")
+      .select("id")
+      .eq("id", data.modelId)
+      .maybeSingle();
+    if (readError) throw new Error(readError.message);
+    if (!existing) throw new Error("模型不存在");
+
+    const patch: Record<string, unknown> = {};
+    if (data.displayName !== undefined) patch["display_name"] = data.displayName;
+    if (data.modelKey !== undefined) patch["model_key"] = data.modelKey;
+    if (data.upstreamId !== undefined) patch["upstream_id"] = data.upstreamId;
+    if (data.description !== undefined) patch["description"] = data.description;
+    if (data.enabled !== undefined) patch["enabled"] = data.enabled;
+    if (data.capabilities !== undefined) patch["capabilities"] = data.capabilities;
+    if (data.slots !== undefined) patch["slots"] = data.slots;
+
+    const ops = await loadOps();
+    let result: "ok" | "error" = "ok";
+    let detail = "无变更";
+    if (Object.keys(patch).length > 0) {
+      const { error } = await db.from("models").update(patch).eq("id", data.modelId);
+      if (error) {
+        result = "error";
+        detail = error.message;
+      } else {
+        detail = Object.keys(patch).join(", ");
+      }
+    }
+    await ops.recordAdminAction(db, {
+      actorUserId: context.userId,
+      action: "update_model",
+      targetType: "model",
+      targetId: data.modelId,
+      result,
+      detail,
+    });
+    if (result === "error") throw new Error(detail);
+    return { ok: true, changed: detail };
+  });
+
+// --- workflow write + test ---------------------------------------------------
+
+export const updateWorkflow = createServerFn({ method: "POST" })
+  .middleware([requireAdmin])
+  .inputValidator((input: unknown) =>
+    z
+      .object({
+        workflowId: z.string(),
+        label: z.string().min(1).max(80).optional(),
+        difyAppId: z.string().max(200).nullable().optional(),
+        appType: z.enum(["workflow", "chatflow"]).optional(),
+        secretRef: z.string().max(200).nullable().optional(),
+        secretSource: z.enum(["cloudflare_env", "supabase_vault"]).optional(),
+        enabled: z.boolean().optional(),
+      })
+      .parse(input),
+  )
+  .handler(async ({ context, data }) => {
+    const db = await adminClient();
+    const { data: existing, error: readError } = await db
+      .from("workflows")
+      .select("id")
+      .eq("id", data.workflowId)
+      .maybeSingle();
+    if (readError) throw new Error(readError.message);
+    if (!existing) throw new Error("Workflow 不存在");
+
+    const patch: Record<string, unknown> = {};
+    if (data.label !== undefined) patch["label"] = data.label;
+    if (data.difyAppId !== undefined) patch["dify_app_id"] = data.difyAppId?.trim() || null;
+    if (data.appType !== undefined) patch["app_type"] = data.appType;
+    if (data.secretRef !== undefined) patch["secret_ref"] = data.secretRef?.trim() || null;
+    if (data.secretSource !== undefined) patch["secret_source"] = data.secretSource;
+    if (data.enabled !== undefined) patch["enabled"] = data.enabled;
+
+    const ops = await loadOps();
+    let result: "ok" | "error" = "ok";
+    let detail = "无变更";
+    if (Object.keys(patch).length > 0) {
+      const { error } = await db.from("workflows").update(patch).eq("id", data.workflowId);
+      if (error) {
+        result = "error";
+        detail = error.message;
+      } else {
+        detail = Object.keys(patch).join(", ");
+      }
+    }
+    await ops.recordAdminAction(db, {
+      actorUserId: context.userId,
+      action: "update_workflow",
+      targetType: "workflow",
+      targetId: data.workflowId,
+      result,
+      detail,
+    });
+    if (result === "error") throw new Error(detail);
+    return { ok: true, changed: detail };
+  });
+
+export const testWorkflowConnection = createServerFn({ method: "POST" })
+  .middleware([requireAdmin])
+  .inputValidator((input: unknown) => z.object({ workflowId: z.string() }).parse(input))
+  .handler(async ({ context, data }) => {
+    const db = await adminClient();
+    const { data: workflow, error } = await db
+      .from("workflows")
+      .select("*")
+      .eq("id", data.workflowId)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!workflow) throw new Error("Workflow 不存在");
+
+    const ops = await loadOps();
+    const result = await ops.testDifyWorkflow(workflow as unknown as Workflow);
+    await ops.recordAdminAction(db, {
+      actorUserId: context.userId,
+      action: "test_workflow_connection",
+      targetType: "workflow",
+      targetId: data.workflowId,
+      result: result.success ? "ok" : "error",
+      detail: result.message,
+    });
+    return result;
+  });
+
+// --- user quota --------------------------------------------------------------
+
+function emptyQuota(userId: string): QuotaInfo {
+  return {
+    user_id: userId,
+    period: "monthly",
+    token_limit: null,
+    token_used: 0,
+    cost_limit: null,
+    cost_used: 0,
+  };
+}
+
+export const getUserQuota = createServerFn({ method: "GET" })
+  .middleware([requireAdmin])
+  .inputValidator((input: unknown) => z.object({ userId: z.string() }).parse(input))
+  .handler(async ({ data }): Promise<QuotaInfo> => {
+    const db = await adminClient();
+    const { data: row, error } = await db
+      .from("user_quotas")
+      .select("*")
+      .eq("user_id", data.userId)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    return (row as unknown as QuotaInfo) ?? emptyQuota(data.userId);
+  });
+
+export const setUserQuota = createServerFn({ method: "POST" })
+  .middleware([requireAdmin])
+  .inputValidator((input: unknown) =>
+    z
+      .object({
+        userId: z.string(),
+        tokenLimit: z.number().int().nonnegative().nullable().optional(),
+        costLimit: z.number().nonnegative().nullable().optional(),
+        period: z.enum(["daily", "weekly", "monthly"]).optional(),
+      })
+      .parse(input),
+  )
+  .handler(async ({ context, data }): Promise<QuotaInfo> => {
+    const db = await adminClient();
+    const { data: userRes, error: userError } = await db.auth.admin.getUserById(data.userId);
+    if (userError || !userRes?.user) throw new Error("用户不存在");
+
+    const patch: Record<string, unknown> = { user_id: data.userId };
+    if (data.tokenLimit !== undefined) patch["token_limit"] = data.tokenLimit;
+    if (data.costLimit !== undefined) patch["cost_limit"] = data.costLimit;
+    if (data.period !== undefined) patch["period"] = data.period;
+
+    const ops = await loadOps();
+    const { data: row, error } = await db
+      .from("user_quotas")
+      .upsert(patch, { onConflict: "user_id" })
+      .select("*")
+      .single();
+    const result: "ok" | "error" = error ? "error" : "ok";
+    await ops.recordAdminAction(db, {
+      actorUserId: context.userId,
+      action: "set_user_quota",
+      targetType: "user",
+      targetId: data.userId,
+      result,
+      detail:
+        result === "ok"
+          ? Object.keys(patch)
+              .filter((k) => k !== "user_id")
+              .join(", ")
+          : error?.message,
+    });
+    if (error) throw new Error(error.message);
+    return row as unknown as QuotaInfo;
   });

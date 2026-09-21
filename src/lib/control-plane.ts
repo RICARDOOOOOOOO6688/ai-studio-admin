@@ -36,7 +36,12 @@ export interface Model {
 
 export interface ModelWithProvider extends Model {
   provider: Pick<Provider, "id" | "name" | "slug" | "enabled" | "secret_ref"> | null;
+  /** enabled ≠ callable: a model is "provider_unavailable" when its Provider
+   *  is disabled or has no secret_ref. */
+  status: ModelStatus;
 }
+
+export type ModelStatus = "enabled" | "disabled" | "provider_unavailable";
 
 export interface Workflow {
   id: string;
@@ -96,6 +101,15 @@ export interface UserQuota {
   cost_limit: number | null;
   cost_used: number;
   updated_at: string;
+}
+
+export interface QuotaInfo {
+  user_id: string;
+  period: string;
+  token_limit: number | null;
+  token_used: number;
+  cost_limit: number | null;
+  cost_used: number;
 }
 
 export interface AdminUser {

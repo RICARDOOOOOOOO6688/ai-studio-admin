@@ -1,11 +1,18 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { useQuery } from "@tanstack/react-query";
-import { ArrowLeft, Check, X } from "lucide-react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
+import { toast } from "sonner";
+import { ArrowLeft, Loader2 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { getModel } from "@/lib/admin.functions";
-import { CAPABILITY_LABELS, SLOT_LABELS } from "@/lib/control-plane";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
+import { getModel, updateModel } from "@/lib/admin.functions";
+import { CAPABILITY_LABELS, SLOT_LABELS, type ModelStatus } from "@/lib/control-plane";
 
 export const Route = createFileRoute("/_admin/models/$modelId")({
   component: ModelDetailPage,
@@ -14,30 +21,19 @@ export const Route = createFileRoute("/_admin/models/$modelId")({
 const ALL_CAPABILITIES = ["chat", "reasoning", "vision", "tool_calling"];
 const ALL_SLOTS = ["navigator", "research", "product", "architecture", "build"];
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div className="flex items-start justify-between gap-4 border-b border-border py-2 last:border-0">
-      <span className="text-sm text-muted-foreground">{label}</span>
-      <span className="text-right text-sm">{children}</span>
-    </div>
-  );
-}
+const STATUS_LABEL: Record<ModelStatus, string> = {
+  enabled: "已启用",
+  disabled: "已停用",
+  provider_unavailable: "Provider 不可用",
+};
 
-function Toggle({ on, label }: { on: boolean; label: string }) {
-  return (
-    <span className="flex items-center gap-2 text-sm">
-      {on ? (
-        <Check className="size-4 text-emerald-500" />
-      ) : (
-        <X className="size-4 text-muted-foreground" />
-      )}
-      <span className={on ? "" : "text-muted-foreground"}>{label}</span>
-    </span>
-  );
+function toggle(list: string[], value: string): string[] {
+  return list.includes(value) ? list.filter((v) => v !== value) : [...list, value];
 }
 
 function ModelDetailPage() {
   const { modelId } = Route.useParams();
+  const queryClient = useQueryClient();
   const {
     data: model,
     isLoading,
@@ -45,6 +41,46 @@ function ModelDetailPage() {
   } = useQuery({
     queryKey: ["model", modelId],
     queryFn: () => getModel({ data: { modelId } }),
+  });
+
+  const [displayName, setDisplayName] = useState("");
+  const [modelKey, setModelKey] = useState("");
+  const [upstreamId, setUpstreamId] = useState("");
+  const [description, setDescription] = useState("");
+  const [enabled, setEnabled] = useState(false);
+  const [capabilities, setCapabilities] = useState<string[]>([]);
+  const [slots, setSlots] = useState<string[]>([]);
+
+  useEffect(() => {
+    if (!model) return;
+    setDisplayName(model.display_name);
+    setModelKey(model.model_key);
+    setUpstreamId(model.upstream_id);
+    setDescription(model.description);
+    setEnabled(model.enabled);
+    setCapabilities(model.capabilities);
+    setSlots(model.slots);
+  }, [model]);
+
+  const save = useMutation({
+    mutationFn: () =>
+      updateModel({
+        data: {
+          modelId,
+          displayName,
+          modelKey,
+          upstreamId,
+          description,
+          enabled,
+          capabilities,
+          slots,
+        },
+      }),
+    onSuccess: () => {
+      toast.success("已保存");
+      queryClient.invalidateQueries();
+    },
+    onError: (e) => toast.error(e instanceof Error ? e.message : "保存失败"),
   });
 
   if (isLoading) return <p className="text-sm text-muted-foreground">加载中…</p>;
@@ -59,19 +95,66 @@ function ModelDetailPage() {
         >
           <ArrowLeft className="size-4" /> Models
         </Link>
-        <h1 className="mt-2 text-xl font-semibold tracking-tight">{model.display_name}</h1>
+        <div className="mt-2 flex items-center gap-3">
+          <h1 className="text-xl font-semibold tracking-tight">{model.display_name}</h1>
+          <Badge
+            className={
+              model.status === "enabled"
+                ? "bg-emerald-500/15 text-emerald-600 hover:bg-emerald-500/15"
+                : model.status === "provider_unavailable"
+                  ? "bg-amber-500/15 text-amber-600 hover:bg-amber-500/15"
+                  : ""
+            }
+            variant={model.status === "disabled" ? "secondary" : "default"}
+          >
+            {STATUS_LABEL[model.status]}
+          </Badge>
+        </div>
       </div>
 
       <Card>
         <CardHeader className="pb-2">
           <CardTitle className="text-sm">基本信息</CardTitle>
         </CardHeader>
-        <CardContent>
-          <Field label="显示名称">{model.display_name}</Field>
-          <Field label="模型 Key">
-            <span className="font-mono text-xs">{model.model_key}</span>
-          </Field>
-          <Field label="Provider">
+        <CardContent className="space-y-3">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="space-y-2">
+              <Label htmlFor="displayName">显示名称</Label>
+              <Input
+                id="displayName"
+                value={displayName}
+                onChange={(e) => setDisplayName(e.target.value)}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="modelKey">模型 Key</Label>
+              <Input
+                id="modelKey"
+                value={modelKey}
+                onChange={(e) => setModelKey(e.target.value)}
+                className="font-mono text-sm"
+              />
+            </div>
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="upstreamId">模型 ID（Provider 侧）</Label>
+            <Input
+              id="upstreamId"
+              value={upstreamId}
+              onChange={(e) => setUpstreamId(e.target.value)}
+              className="font-mono text-sm"
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="description">描述</Label>
+            <Input
+              id="description"
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+            />
+          </div>
+          <div className="space-y-1 text-sm">
+            <span className="text-muted-foreground">Provider：</span>
             {model.provider ? (
               <Link
                 to="/providers/$providerId"
@@ -83,11 +166,7 @@ function ModelDetailPage() {
             ) : (
               "—"
             )}
-          </Field>
-          <Field label="模型 ID">
-            <span className="font-mono text-xs">{model.upstream_id}</span>
-          </Field>
-          <Field label="描述">{model.description || "—"}</Field>
+          </div>
         </CardContent>
       </Card>
 
@@ -97,23 +176,14 @@ function ModelDetailPage() {
         </CardHeader>
         <CardContent className="grid grid-cols-2 gap-3 sm:grid-cols-4">
           {ALL_CAPABILITIES.map((c) => (
-            <Toggle key={c} on={model.capabilities.includes(c)} label={CAPABILITY_LABELS[c] ?? c} />
+            <label key={c} className="flex items-center gap-2 text-sm">
+              <Checkbox
+                checked={capabilities.includes(c)}
+                onCheckedChange={() => setCapabilities((prev) => toggle(prev, c))}
+              />
+              {CAPABILITY_LABELS[c] ?? c}
+            </label>
           ))}
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader className="pb-2">
-          <CardTitle className="text-sm">使用状态</CardTitle>
-        </CardHeader>
-        <CardContent>
-          {model.enabled ? (
-            <Badge className="bg-emerald-500/15 text-emerald-600 hover:bg-emerald-500/15">
-              已启用
-            </Badge>
-          ) : (
-            <Badge variant="secondary">未启用</Badge>
-          )}
         </CardContent>
       </Card>
 
@@ -123,8 +193,33 @@ function ModelDetailPage() {
         </CardHeader>
         <CardContent className="grid grid-cols-2 gap-3 sm:grid-cols-3">
           {ALL_SLOTS.map((s) => (
-            <Toggle key={s} on={model.slots.includes(s)} label={SLOT_LABELS[s] ?? s} />
+            <label key={s} className="flex items-center gap-2 text-sm">
+              <Checkbox
+                checked={slots.includes(s)}
+                onCheckedChange={() => setSlots((prev) => toggle(prev, s))}
+              />
+              {SLOT_LABELS[s] ?? s}
+            </label>
           ))}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader className="pb-2">
+          <CardTitle className="text-sm">使用状态</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="flex items-center justify-between rounded-lg border border-border px-3 py-2">
+            <Label htmlFor="enabled">启用</Label>
+            <Switch id="enabled" checked={enabled} onCheckedChange={setEnabled} />
+          </div>
+          <p className="text-xs text-muted-foreground">
+            「已启用」不等于可调用：还需 Provider 启用且 secret_ref 可解析。
+          </p>
+          <Button onClick={() => save.mutate()} disabled={save.isPending}>
+            {save.isPending && <Loader2 className="animate-spin" />}
+            保存
+          </Button>
         </CardContent>
       </Card>
     </div>
