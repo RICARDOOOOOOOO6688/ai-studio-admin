@@ -1,45 +1,23 @@
-// Server-only helpers for the Admin control plane.
+// Server-only helpers for the Admin control plane (ai_* schema).
 //
-// This module touches process.env and resolves secrets, so it must never be
-// imported by client code. Server functions load it with a dynamic import
-// inside their handlers.
+// Secret rules: a value is only ever held in a local variable; it is never
+// returned, logged, or inserted into the database. The control plane has no
+// `secret_source` column, so a `secret_ref` is always an env binding name.
 //
-// Secret rules enforced here:
-//   - a secret VALUE is only ever held in a local variable, never returned,
-//     never logged, never inserted into the database;
-//   - the database stores only `secret_ref` (a name) and `secret_source`;
-//   - error text is sanitized before it leaves this module.
-
-import type { SupabaseClient } from "@supabase/supabase-js";
-import type { Database } from "@/integrations/supabase/types";
+// There is no audit table (activity_events does not exist), so no admin-action
+// audit is recorded — this is intentional, not a silent omission.
 
 export type SecretResolution = { ok: true; value: string } | { ok: false; reason: string };
 
-/**
- * Resolve a `secret_ref` to its value server-side.
- *
- * `cloudflare_env` reads a Worker binding / process env var by name.
- * `supabase_vault` is intentionally NOT connected yet — it returns a clear
- * "not connected" reason instead of faking success.
- */
-export function resolveSecret(
-  secretRef: string | null | undefined,
-  secretSource: string,
-): SecretResolution {
+export function resolveSecret(secretRef: string | null | undefined): SecretResolution {
   const ref = secretRef?.trim();
-  if (!ref) return { ok: false, reason: "未配置 Secret" };
-
-  if (secretSource === "supabase_vault") {
-    // TODO(phase 3): read from Supabase Vault via service_role rpc.
-    return { ok: false, reason: "Supabase Vault 尚未连接（TODO）" };
-  }
-
+  if (!ref) return { ok: false, reason: "未配置 secret_ref" };
   const value = process.env[ref]?.trim();
-  if (!value) return { ok: false, reason: `Cloudflare 绑定 ${ref} 不存在` };
+  if (!value) return { ok: false, reason: `环境绑定 ${ref} 不存在` };
   return { ok: true, value };
 }
 
-/** Strip anything that looks like the secret from an outgoing message. */
+/** Strip anything that looks like a secret before a message leaves the server. */
 export function sanitizeSecretText(text: string, secrets: (string | null | undefined)[]): string {
   let out = text;
   for (const s of secrets) {
@@ -50,36 +28,22 @@ export function sanitizeSecretText(text: string, secrets: (string | null | undef
   return out.slice(0, 300);
 }
 
+/** Normalize a base URL: strip trailing slashes; empty path → append /v1. */
+export function normalizeBaseUrl(raw: string): string {
+  const trimmed = raw.trim().replace(/\/+$/, "");
+  try {
+    const u = new URL(trimmed);
+    if (u.pathname === "" || u.pathname === "/") return `${u.origin}/v1`;
+    return trimmed;
+  } catch {
+    return trimmed;
+  }
+}
+
 export interface ConnectionResult {
   success: boolean;
   latencyMs: number | null;
   message: string;
-}
-
-const DIFY_DEFAULT_BASE = "https://api.dify.ai/v1";
-
-function difyBaseUrl(): string {
-  return (process.env["DIFY_API_BASE"] ?? process.env["DIFY_API_URL"] ?? DIFY_DEFAULT_BASE).replace(
-    /\/+$/,
-    "",
-  );
-}
-
-function defaultBase(kind: string): string {
-  switch (kind) {
-    case "openai":
-      return "https://api.openai.com/v1";
-    case "anthropic":
-      return "https://api.anthropic.com";
-    case "google":
-      return "https://generativelanguage.googleapis.com";
-    case "deepseek":
-      return "https://api.deepseek.com/v1";
-    case "dify":
-      return difyBaseUrl();
-    default:
-      return "";
-  }
 }
 
 async function timedFetch(
@@ -94,7 +58,7 @@ async function timedFetch(
     const res = await fetch(url, { headers, signal: controller.signal });
     clearTimeout(timer);
     const latencyMs = Date.now() - start;
-    if (res.ok) return { success: true, latencyMs, message: `连接成功（HTTP ${res.status}）` };
+    if (res.ok) return { success: true, latencyMs, message: `HTTP ${res.status}` };
     const detail = await res.text().catch(() => "");
     return {
       success: false,
@@ -110,88 +74,55 @@ async function timedFetch(
   }
 }
 
+/**
+ * Generic provider connectivity test: GET {base}/models with the resolved
+ * secret. This is intentionally NOT provider-type-specific — the schema has no
+ * type column, so it must not claim to validate a Dify workflow.
+ */
 export async function testProvider(provider: {
-  kind: string;
   base_url: string | null;
   secret_ref: string | null;
-  secret_source: string;
 }): Promise<ConnectionResult> {
-  const resolved = resolveSecret(provider.secret_ref, provider.secret_source);
+  if (!provider.base_url?.trim()) {
+    return { success: false, latencyMs: null, message: "未配置 base_url" };
+  }
+  const resolved = resolveSecret(provider.secret_ref);
   if (!resolved.ok) return { success: false, latencyMs: null, message: resolved.reason };
 
-  const base = (provider.base_url?.trim() || defaultBase(provider.kind)).replace(/\/+$/, "");
-  if (!base) return { success: false, latencyMs: null, message: "未配置 Base URL" };
-
-  const key = resolved.value;
-  let url = `${base}/models`;
-  const headers: Record<string, string> = {};
-
-  switch (provider.kind) {
-    case "anthropic":
-      url = `${base}/v1/models`;
-      headers["x-api-key"] = key;
-      headers["anthropic-version"] = "2023-06-01";
-      break;
-    case "google":
-      url = `${base}/v1beta/models?key=${encodeURIComponent(key)}`;
-      break;
-    default:
-      headers["Authorization"] = `Bearer ${key}`;
-  }
-
-  return timedFetch(url, headers, [key]);
+  const url = `${normalizeBaseUrl(provider.base_url)}/models`;
+  const result = await timedFetch(url, { Authorization: `Bearer ${resolved.value}` }, [
+    resolved.value,
+  ]);
+  return {
+    ...result,
+    message: result.success
+      ? `通用 models 连通性测试通过（HTTP 200）`
+      : `通用 models 连通性测试失败：${result.message}`,
+  };
 }
 
-export async function testDifyWorkflow(workflow: {
-  dify_app_id: string | null;
-  secret_ref: string | null;
-  secret_source: string;
-}): Promise<ConnectionResult> {
-  if (!workflow.dify_app_id?.trim()) {
-    return { success: false, latencyMs: null, message: "未配置 Dify App ID" };
+/** Dify workflow connectivity test: GET {normalize(base_url)}/parameters. */
+export async function testDifyWorkflow(
+  workflow: { secret_ref: string | null },
+  provider: { base_url: string | null; secret_ref: string | null } | null,
+): Promise<ConnectionResult> {
+  if (!provider)
+    return { success: false, latencyMs: null, message: "未找到该工作流对应的 Provider" };
+  if (!provider.base_url?.trim()) {
+    return { success: false, latencyMs: null, message: "Provider 未配置 base_url" };
   }
-  const resolved = resolveSecret(workflow.secret_ref, workflow.secret_source);
+  const ref = workflow.secret_ref?.trim() || provider.secret_ref?.trim() || null;
+  const resolved = resolveSecret(ref);
   if (!resolved.ok) return { success: false, latencyMs: null, message: resolved.reason };
 
-  const key = resolved.value;
-  const url = `${difyBaseUrl()}/parameters`;
-  return timedFetch(url, { Authorization: `Bearer ${key}` }, [key]);
-}
-
-// --- audit log ---------------------------------------------------------------
-
-export interface AuditEntry {
-  actorUserId: string;
-  action: string;
-  targetType: string;
-  targetId: string;
-  result: "ok" | "error";
-  detail?: string | undefined;
-}
-
-/**
- * Append an admin action to activity_events (reused as the audit log).
- * Never pass secret values in `detail` — only names/ids/statuses.
- * Failures are swallowed: auditing must not break the operation.
- */
-export async function recordAdminAction(
-  db: SupabaseClient<Database>,
-  entry: AuditEntry,
-): Promise<void> {
-  try {
-    await db.from("activity_events").insert({
-      type: "admin_action",
-      title: `${entry.action} · ${entry.targetType}`,
-      actor_user_id: entry.actorUserId,
-      metadata: {
-        action: entry.action,
-        target_type: entry.targetType,
-        target_id: entry.targetId,
-        result: entry.result,
-        detail: entry.detail ?? null,
-      },
-    });
-  } catch {
-    // ignored on purpose
-  }
+  const url = `${normalizeBaseUrl(provider.base_url)}/parameters`;
+  const result = await timedFetch(url, { Authorization: `Bearer ${resolved.value}` }, [
+    resolved.value,
+  ]);
+  return {
+    ...result,
+    message: result.success
+      ? `Dify /parameters 连通性测试通过（HTTP 200）`
+      : `Dify /parameters 测试失败：${result.message}`,
+  };
 }

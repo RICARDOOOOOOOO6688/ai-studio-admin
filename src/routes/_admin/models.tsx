@@ -19,6 +19,13 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
   Table,
   TableBody,
   TableCell,
@@ -26,15 +33,15 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { listModels, updateModel } from "@/lib/admin.functions";
-import { CAPABILITY_LABELS, SLOT_LABELS, type ModelWithProvider } from "@/lib/control-plane";
+import { listModels, listProviders, updateModel } from "@/lib/admin.functions";
+import { CAPABILITY_LABELS, type ModelWithProvider } from "@/lib/control-plane";
 
 export const Route = createFileRoute("/_admin/models")({
   component: ModelsPage,
 });
 
 const ALL_CAPABILITIES = ["chat", "reasoning", "vision", "tool_calling"];
-const ALL_SLOTS = ["navigator", "research", "product", "architecture", "build"];
+const NO_PROVIDER = "__none__";
 
 function StatusBadge({ status }: { status: ModelWithProvider["status"] }) {
   if (status === "enabled") {
@@ -58,26 +65,28 @@ function toggle(list: string[], value: string): string[] {
 
 function ModelEditDialog({ model, onClose }: { model: ModelWithProvider; onClose: () => void }) {
   const queryClient = useQueryClient();
-  const [displayName, setDisplayName] = useState(model.display_name);
-  const [modelKey, setModelKey] = useState(model.model_key);
-  const [upstreamId, setUpstreamId] = useState(model.upstream_id);
+  const { data: providers = [] } = useQuery({
+    queryKey: ["providers"],
+    queryFn: () => listProviders(),
+  });
+  const [key, setKey] = useState(model.key);
+  const [name, setName] = useState(model.name);
   const [description, setDescription] = useState(model.description);
   const [enabled, setEnabled] = useState(model.enabled);
   const [capabilities, setCapabilities] = useState<string[]>(model.capabilities);
-  const [slots, setSlots] = useState<string[]>(model.slots);
+  const [providerKey, setProviderKey] = useState(model.provider_key ?? NO_PROVIDER);
 
   const mutation = useMutation({
     mutationFn: () =>
       updateModel({
         data: {
           modelId: model.id,
-          displayName,
-          modelKey,
-          upstreamId,
+          key,
+          name,
           description,
           enabled,
           capabilities,
-          slots,
+          providerKey: providerKey === NO_PROVIDER ? null : providerKey,
         },
       }),
     onSuccess: () => {
@@ -92,38 +101,25 @@ function ModelEditDialog({ model, onClose }: { model: ModelWithProvider; onClose
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="max-h-[85vh] overflow-y-auto">
         <DialogHeader>
-          <DialogTitle>编辑 {model.display_name}</DialogTitle>
-          <DialogDescription>模型归属 Provider，换模型不影响 Provider。</DialogDescription>
+          <DialogTitle>编辑 {model.name}</DialogTitle>
+          <DialogDescription>模型是目录条目，不参与实际执行。</DialogDescription>
         </DialogHeader>
 
         <div className="space-y-4">
           <div className="grid gap-3 sm:grid-cols-2">
             <div className="space-y-2">
-              <Label htmlFor="displayName">显示名称</Label>
+              <Label htmlFor="key">Key</Label>
               <Input
-                id="displayName"
-                value={displayName}
-                onChange={(e) => setDisplayName(e.target.value)}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="modelKey">模型 Key</Label>
-              <Input
-                id="modelKey"
-                value={modelKey}
-                onChange={(e) => setModelKey(e.target.value)}
+                id="key"
+                value={key}
+                onChange={(e) => setKey(e.target.value)}
                 className="font-mono text-sm"
               />
             </div>
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="upstreamId">模型 ID（Provider 侧）</Label>
-            <Input
-              id="upstreamId"
-              value={upstreamId}
-              onChange={(e) => setUpstreamId(e.target.value)}
-              className="font-mono text-sm"
-            />
+            <div className="space-y-2">
+              <Label htmlFor="name">名称</Label>
+              <Input id="name" value={name} onChange={(e) => setName(e.target.value)} />
+            </div>
           </div>
           <div className="space-y-2">
             <Label htmlFor="description">描述</Label>
@@ -133,7 +129,22 @@ function ModelEditDialog({ model, onClose }: { model: ModelWithProvider; onClose
               onChange={(e) => setDescription(e.target.value)}
             />
           </div>
-
+          <div className="space-y-2">
+            <Label>Provider（provider_key）</Label>
+            <Select value={providerKey} onValueChange={setProviderKey}>
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={NO_PROVIDER}>（不关联）</SelectItem>
+                {providers.map((p) => (
+                  <SelectItem key={p.id} value={p.key}>
+                    {p.name} ({p.key})
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
           <div className="space-y-2">
             <Label>能力</Label>
             <div className="grid grid-cols-2 gap-2">
@@ -148,22 +159,6 @@ function ModelEditDialog({ model, onClose }: { model: ModelWithProvider; onClose
               ))}
             </div>
           </div>
-
-          <div className="space-y-2">
-            <Label>可用于</Label>
-            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-              {ALL_SLOTS.map((s) => (
-                <label key={s} className="flex items-center gap-2 text-sm">
-                  <Checkbox
-                    checked={slots.includes(s)}
-                    onCheckedChange={() => setSlots((prev) => toggle(prev, s))}
-                  />
-                  {SLOT_LABELS[s] ?? s}
-                </label>
-              ))}
-            </div>
-          </div>
-
           <div className="flex items-center justify-between rounded-lg border border-border px-3 py-2">
             <Label htmlFor="enabled">启用</Label>
             <Switch id="enabled" checked={enabled} onCheckedChange={setEnabled} />
@@ -207,7 +202,7 @@ function ModelsPage() {
       <div>
         <h1 className="text-xl font-semibold tracking-tight">Models</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          「已启用」不等于可调用：Provider 未启用或缺密钥时显示为「Provider 不可用」。
+          模型目录，通过 provider_key 归属；当前不参与 Dify 执行。
         </p>
       </div>
 
@@ -218,7 +213,7 @@ function ModelsPage() {
               <TableHead>名称</TableHead>
               <TableHead>Provider</TableHead>
               <TableHead>状态</TableHead>
-              <TableHead>用途</TableHead>
+              <TableHead>能力</TableHead>
               <TableHead>启用</TableHead>
               <TableHead className="text-right">操作</TableHead>
             </TableRow>
@@ -246,11 +241,9 @@ function ModelsPage() {
                     params={{ modelId: m.id }}
                     className="font-medium text-primary hover:underline"
                   >
-                    {m.display_name}
+                    {m.name}
                   </Link>
-                  <span className="ml-2 font-mono text-xs text-muted-foreground">
-                    {m.model_key}
-                  </span>
+                  <span className="ml-2 font-mono text-xs text-muted-foreground">{m.key}</span>
                 </TableCell>
                 <TableCell className="text-sm text-muted-foreground">
                   {m.provider?.name ?? "—"}
@@ -259,7 +252,9 @@ function ModelsPage() {
                   <StatusBadge status={m.status} />
                 </TableCell>
                 <TableCell className="text-xs text-muted-foreground">
-                  {m.slots.length === 0 ? "—" : m.slots.map((s) => SLOT_LABELS[s] ?? s).join("、")}
+                  {m.capabilities.length === 0
+                    ? "—"
+                    : m.capabilities.map((c) => CAPABILITY_LABELS[c] ?? c).join("、")}
                 </TableCell>
                 <TableCell>
                   <Switch

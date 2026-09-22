@@ -32,33 +32,52 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { listWorkflows, testWorkflowConnection, updateWorkflow } from "@/lib/admin.functions";
-import type { SecretSource, Workflow } from "@/lib/control-plane";
+import {
+  listProviders,
+  listWorkflows,
+  testWorkflowConnection,
+  updateWorkflow,
+} from "@/lib/admin.functions";
+import type { WorkflowWithProvider } from "@/lib/control-plane";
 
 export const Route = createFileRoute("/_admin/workflows")({
   component: WorkflowsPage,
 });
 
-function WorkflowEditDialog({ workflow, onClose }: { workflow: Workflow; onClose: () => void }) {
+const NO_PROVIDER = "__none__";
+
+function WorkflowEditDialog({
+  workflow,
+  onClose,
+}: {
+  workflow: WorkflowWithProvider;
+  onClose: () => void;
+}) {
   const queryClient = useQueryClient();
-  const [label, setLabel] = useState(workflow.label);
-  const [difyAppId, setDifyAppId] = useState(workflow.dify_app_id ?? "");
-  const [appType, setAppType] = useState(workflow.app_type);
+  const { data: providers = [] } = useQuery({
+    queryKey: ["providers"],
+    queryFn: () => listProviders(),
+  });
+  const [key, setKey] = useState(workflow.key);
+  const [name, setName] = useState(workflow.name);
+  const [description, setDescription] = useState(workflow.description);
   const [secretRef, setSecretRef] = useState(workflow.secret_ref ?? "");
-  const [secretSource, setSecretSource] = useState<SecretSource>(workflow.secret_source);
+  const [providerKey, setProviderKey] = useState(workflow.provider_key ?? NO_PROVIDER);
   const [enabled, setEnabled] = useState(workflow.enabled);
+  const [sortOrder, setSortOrder] = useState(String(workflow.sort_order));
 
   const mutation = useMutation({
     mutationFn: () =>
       updateWorkflow({
         data: {
           workflowId: workflow.id,
-          label,
-          difyAppId: difyAppId.trim() || null,
-          appType,
+          key,
+          name,
+          description,
           secretRef: secretRef.trim() || null,
-          secretSource,
+          providerKey: providerKey === NO_PROVIDER ? null : providerKey,
           enabled,
+          sortOrder: Number.parseInt(sortOrder, 10) || 0,
         },
       }),
     onSuccess: () => {
@@ -71,62 +90,73 @@ function WorkflowEditDialog({ workflow, onClose }: { workflow: Workflow; onClose
 
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
-      <DialogContent>
+      <DialogContent className="max-h-[85vh] overflow-y-auto">
         <DialogHeader>
-          <DialogTitle>编辑 {workflow.label}</DialogTitle>
+          <DialogTitle>编辑 {workflow.name}</DialogTitle>
           <DialogDescription>
-            「已连接」需要 Dify App ID 与可解析的 secret_ref 同时具备。
+            「已连接」= 启用 + Provider 启用且有 base_url + (workflow 或 provider 的 secret_ref)
+            有值。
           </DialogDescription>
         </DialogHeader>
 
         <div className="space-y-4">
-          <div className="space-y-2">
-            <Label htmlFor="label">名称</Label>
-            <Input id="label" value={label} onChange={(e) => setLabel(e.target.value)} />
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="space-y-2">
+              <Label htmlFor="key">Key</Label>
+              <Input
+                id="key"
+                value={key}
+                onChange={(e) => setKey(e.target.value)}
+                className="font-mono text-sm"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="name">名称</Label>
+              <Input id="name" value={name} onChange={(e) => setName(e.target.value)} />
+            </div>
           </div>
           <div className="space-y-2">
-            <Label htmlFor="difyAppId">Dify App ID</Label>
+            <Label htmlFor="description">描述</Label>
             <Input
-              id="difyAppId"
-              value={difyAppId}
-              onChange={(e) => setDifyAppId(e.target.value)}
-              placeholder="留空表示清除"
-              className="font-mono text-sm"
+              id="description"
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
             />
           </div>
           <div className="space-y-2">
-            <Label>应用类型</Label>
-            <Select value={appType} onValueChange={(v) => setAppType(v as Workflow["app_type"])}>
+            <Label>Provider（provider_key）</Label>
+            <Select value={providerKey} onValueChange={setProviderKey}>
               <SelectTrigger>
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="workflow">workflow</SelectItem>
-                <SelectItem value="chatflow">chatflow</SelectItem>
+                <SelectItem value={NO_PROVIDER}>（不关联）</SelectItem>
+                {providers.map((p) => (
+                  <SelectItem key={p.id} value={p.key}>
+                    {p.name} ({p.key})
+                  </SelectItem>
+                ))}
               </SelectContent>
             </Select>
           </div>
           <div className="space-y-2">
-            <Label htmlFor="secretRef">密钥引用（secret_ref）</Label>
+            <Label htmlFor="secretRef">密钥引用（secret_ref，可空则回退 provider）</Label>
             <Input
               id="secretRef"
               value={secretRef}
               onChange={(e) => setSecretRef(e.target.value)}
-              placeholder="例如 DIFY_RESEARCH_KEY（留空表示清除）"
+              placeholder="留空则使用 Provider 的 secret_ref"
               className="font-mono text-sm"
             />
           </div>
           <div className="space-y-2">
-            <Label>来源</Label>
-            <Select value={secretSource} onValueChange={(v) => setSecretSource(v as SecretSource)}>
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="cloudflare_env">cloudflare_env</SelectItem>
-                <SelectItem value="supabase_vault">supabase_vault</SelectItem>
-              </SelectContent>
-            </Select>
+            <Label htmlFor="sortOrder">排序</Label>
+            <Input
+              id="sortOrder"
+              type="number"
+              value={sortOrder}
+              onChange={(e) => setSortOrder(e.target.value)}
+            />
           </div>
           <div className="flex items-center justify-between rounded-lg border border-border px-3 py-2">
             <Label htmlFor="enabled">启用</Label>
@@ -150,7 +180,7 @@ function WorkflowEditDialog({ workflow, onClose }: { workflow: Workflow; onClose
 
 function WorkflowsPage() {
   const queryClient = useQueryClient();
-  const [editing, setEditing] = useState<Workflow | null>(null);
+  const [editing, setEditing] = useState<WorkflowWithProvider | null>(null);
 
   const { data: workflows = [], isLoading } = useQuery({
     queryKey: ["workflows"],
@@ -169,9 +199,8 @@ function WorkflowsPage() {
   const test = useMutation({
     mutationFn: (workflowId: string) => testWorkflowConnection({ data: { workflowId } }),
     onSuccess: (r) => {
-      if (r.success) toast.success(`连接成功 · ${r.latencyMs ?? 0}ms`);
+      if (r.success) toast.success(`Dify /parameters 连通性测试通过 · ${r.latencyMs ?? 0}ms`);
       else toast.error(r.message);
-      queryClient.invalidateQueries({ queryKey: ["activity"] });
     },
     onError: (e) => toast.error(e instanceof Error ? e.message : "测试失败"),
   });
@@ -180,7 +209,10 @@ function WorkflowsPage() {
     <div className="mx-auto w-full max-w-5xl space-y-5">
       <div>
         <h1 className="text-xl font-semibold tracking-tight">Workflows</h1>
-        <p className="mt-1 text-sm text-muted-foreground">只配置引用与状态；不在此执行 Dify。</p>
+        <p className="mt-1 text-sm text-muted-foreground">
+          可执行单元。通过 provider_key 找到 base_url；密钥取 workflow.secret_ref，缺则回退
+          provider。
+        </p>
       </div>
 
       <div className="rounded-xl border border-border bg-card">
@@ -188,8 +220,7 @@ function WorkflowsPage() {
           <TableHeader>
             <TableRow>
               <TableHead>工作流</TableHead>
-              <TableHead>类型</TableHead>
-              <TableHead>Dify App ID</TableHead>
+              <TableHead>Provider</TableHead>
               <TableHead>密钥引用</TableHead>
               <TableHead>连接状态</TableHead>
               <TableHead>启用</TableHead>
@@ -199,73 +230,69 @@ function WorkflowsPage() {
           <TableBody>
             {isLoading && (
               <TableRow>
-                <TableCell colSpan={7} className="text-center text-sm text-muted-foreground">
+                <TableCell colSpan={6} className="text-center text-sm text-muted-foreground">
                   加载中…
                 </TableCell>
               </TableRow>
             )}
             {!isLoading && workflows.length === 0 && (
               <TableRow>
-                <TableCell colSpan={7} className="text-center text-sm text-muted-foreground">
+                <TableCell colSpan={6} className="text-center text-sm text-muted-foreground">
                   暂无工作流
                 </TableCell>
               </TableRow>
             )}
-            {workflows.map((w) => {
-              const connected = Boolean(w.dify_app_id && w.secret_ref);
-              return (
-                <TableRow key={w.id}>
-                  <TableCell>
-                    <span className="font-medium">{w.label}</span>
-                    <span className="ml-2 font-mono text-xs text-muted-foreground">{w.key}</span>
-                  </TableCell>
-                  <TableCell className="text-sm text-muted-foreground">{w.app_type}</TableCell>
-                  <TableCell className="font-mono text-xs">
-                    {w.dify_app_id ?? <span className="text-muted-foreground">未配置</span>}
-                  </TableCell>
-                  <TableCell className="font-mono text-xs">
-                    {w.secret_ref ?? <span className="text-muted-foreground">未配置</span>}
-                  </TableCell>
-                  <TableCell>
-                    {connected ? (
-                      <Badge className="bg-emerald-500/15 text-emerald-600 hover:bg-emerald-500/15">
-                        已连接
-                      </Badge>
-                    ) : (
-                      <Badge variant="secondary">待配置</Badge>
-                    )}
-                  </TableCell>
-                  <TableCell>
-                    <Switch
-                      checked={w.enabled}
-                      disabled={toggle.isPending && toggle.variables?.workflowId === w.id}
-                      onCheckedChange={(v) => toggle.mutate({ workflowId: w.id, enabled: v })}
-                    />
-                  </TableCell>
-                  <TableCell className="text-right">
-                    <div className="flex justify-end gap-1">
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => test.mutate(w.id)}
-                        disabled={test.isPending && test.variables === w.id}
-                      >
-                        {test.isPending && test.variables === w.id ? (
-                          <Loader2 className="animate-spin" />
-                        ) : (
-                          <Zap />
-                        )}
-                        测试
-                      </Button>
-                      <Button variant="ghost" size="sm" onClick={() => setEditing(w)}>
-                        <Pencil />
-                        编辑
-                      </Button>
-                    </div>
-                  </TableCell>
-                </TableRow>
-              );
-            })}
+            {workflows.map((w) => (
+              <TableRow key={w.id}>
+                <TableCell>
+                  <span className="font-medium">{w.name}</span>
+                  <span className="ml-2 font-mono text-xs text-muted-foreground">{w.key}</span>
+                </TableCell>
+                <TableCell className="text-sm text-muted-foreground">
+                  {w.provider?.name ?? "—"}
+                </TableCell>
+                <TableCell className="font-mono text-xs">
+                  {w.secret_ref ?? <span className="text-muted-foreground">回退 provider</span>}
+                </TableCell>
+                <TableCell>
+                  {w.connected ? (
+                    <Badge className="bg-emerald-500/15 text-emerald-600 hover:bg-emerald-500/15">
+                      已连接
+                    </Badge>
+                  ) : (
+                    <Badge variant="secondary">待配置</Badge>
+                  )}
+                </TableCell>
+                <TableCell>
+                  <Switch
+                    checked={w.enabled}
+                    disabled={toggle.isPending && toggle.variables?.workflowId === w.id}
+                    onCheckedChange={(v) => toggle.mutate({ workflowId: w.id, enabled: v })}
+                  />
+                </TableCell>
+                <TableCell className="text-right">
+                  <div className="flex justify-end gap-1">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => test.mutate(w.id)}
+                      disabled={test.isPending && test.variables === w.id}
+                    >
+                      {test.isPending && test.variables === w.id ? (
+                        <Loader2 className="animate-spin" />
+                      ) : (
+                        <Zap />
+                      )}
+                      测试
+                    </Button>
+                    <Button variant="ghost" size="sm" onClick={() => setEditing(w)}>
+                      <Pencil />
+                      编辑
+                    </Button>
+                  </div>
+                </TableCell>
+              </TableRow>
+            ))}
           </TableBody>
         </Table>
       </div>

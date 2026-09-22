@@ -12,7 +12,6 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as AdminRouteRouteImport } from './routes/_admin/route'
 import { Route as AuthRouteImport } from './routes/auth'
 import { Route as AdminIndexRouteImport } from './routes/_admin/index'
-import { Route as AdminKnowledgeRouteImport } from './routes/_admin/knowledge'
 import { Route as AdminModelsRouteImport } from './routes/_admin/models'
 import { Route as AdminProvidersRouteImport } from './routes/_admin/providers'
 import { Route as AdminUsageRouteImport } from './routes/_admin/usage'
@@ -33,11 +32,6 @@ const AuthRoute = AuthRouteImport.update({
 const AdminIndexRoute = AdminIndexRouteImport.update({
   id: '/',
   path: '/',
-  getParentRoute: () => AdminRouteRoute,
-} as any)
-const AdminKnowledgeRoute = AdminKnowledgeRouteImport.update({
-  id: '/knowledge',
-  path: '/knowledge',
   getParentRoute: () => AdminRouteRoute,
 } as any)
 const AdminModelsRoute = AdminModelsRouteImport.update({
@@ -80,7 +74,6 @@ const AdminProvidersProviderIdRoute =
 export interface FileRoutesByFullPath {
   '/': typeof AdminIndexRoute
   '/auth': typeof AuthRoute
-  '/knowledge': typeof AdminKnowledgeRoute
   '/models': typeof AdminModelsRouteWithChildren
   '/providers': typeof AdminProvidersRouteWithChildren
   '/usage': typeof AdminUsageRoute
@@ -91,7 +84,6 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   '/auth': typeof AuthRoute
-  '/knowledge': typeof AdminKnowledgeRoute
   '/models': typeof AdminModelsRouteWithChildren
   '/providers': typeof AdminProvidersRouteWithChildren
   '/usage': typeof AdminUsageRoute
@@ -105,7 +97,6 @@ export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/_admin': typeof AdminRouteRouteWithChildren
   '/auth': typeof AuthRoute
-  '/_admin/knowledge': typeof AdminKnowledgeRoute
   '/_admin/models': typeof AdminModelsRouteWithChildren
   '/_admin/providers': typeof AdminProvidersRouteWithChildren
   '/_admin/usage': typeof AdminUsageRoute
@@ -120,7 +111,6 @@ export interface FileRouteTypes {
   fullPaths:
     | '/'
     | '/auth'
-    | '/knowledge'
     | '/models'
     | '/providers'
     | '/usage'
@@ -131,7 +121,6 @@ export interface FileRouteTypes {
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/auth'
-    | '/knowledge'
     | '/models'
     | '/providers'
     | '/usage'
@@ -144,7 +133,6 @@ export interface FileRouteTypes {
     | '__root__'
     | '/_admin'
     | '/auth'
-    | '/_admin/knowledge'
     | '/_admin/models'
     | '/_admin/providers'
     | '/_admin/usage'
@@ -181,13 +169,6 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof AdminIndexRouteImport
-      parentRoute: typeof AdminRouteRoute
-    }
-    '/_admin/knowledge': {
-      id: '/_admin/knowledge'
-      path: '/knowledge'
-      fullPath: '/knowledge'
-      preLoaderRoute: typeof AdminKnowledgeRouteImport
       parentRoute: typeof AdminRouteRoute
     }
     '/_admin/models': {
@@ -267,7 +248,6 @@ const AdminProvidersRouteWithChildren = AdminProvidersRoute._addFileChildren(
 )
 
 interface AdminRouteRouteChildren {
-  AdminKnowledgeRoute: typeof AdminKnowledgeRoute
   AdminModelsRoute: typeof AdminModelsRouteWithChildren
   AdminProvidersRoute: typeof AdminProvidersRouteWithChildren
   AdminUsageRoute: typeof AdminUsageRoute
@@ -277,7 +257,6 @@ interface AdminRouteRouteChildren {
 }
 
 const AdminRouteRouteChildren: AdminRouteRouteChildren = {
-  AdminKnowledgeRoute: AdminKnowledgeRoute,
   AdminModelsRoute: AdminModelsRouteWithChildren,
   AdminProvidersRoute: AdminProvidersRouteWithChildren,
   AdminUsageRoute: AdminUsageRoute,

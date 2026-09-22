@@ -10,28 +10,11 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { getProvider, testProviderConnection, updateProvider } from "@/lib/admin.functions";
-import type { SecretSource } from "@/lib/control-plane";
 
 export const Route = createFileRoute("/_admin/providers/$providerId")({
   component: ProviderDetailPage,
 });
-
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div className="flex items-start justify-between gap-4 border-b border-border py-2 last:border-0">
-      <span className="text-sm text-muted-foreground">{label}</span>
-      <span className="text-right text-sm">{children}</span>
-    </div>
-  );
-}
 
 function ProviderDetailPage() {
   const { providerId } = Route.useParams();
@@ -43,26 +26,25 @@ function ProviderDetailPage() {
 
   const provider = data?.provider;
 
+  const [key, setKey] = useState("");
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
   const [secretRef, setSecretRef] = useState("");
-  const [secretSource, setSecretSource] = useState<SecretSource>("cloudflare_env");
   const [enabled, setEnabled] = useState(false);
 
   useEffect(() => {
     if (!provider) return;
+    setKey(provider.key);
+    setName(provider.name);
+    setDescription(provider.description);
     setSecretRef(provider.secret_ref ?? "");
-    setSecretSource(provider.secret_source);
     setEnabled(provider.enabled);
   }, [provider]);
 
   const save = useMutation({
     mutationFn: () =>
       updateProvider({
-        data: {
-          providerId,
-          secretRef: secretRef.trim() || null,
-          secretSource,
-          enabled,
-        },
+        data: { providerId, key, name, description, secretRef: secretRef.trim() || null, enabled },
       }),
     onSuccess: () => {
       toast.success("已保存");
@@ -74,9 +56,8 @@ function ProviderDetailPage() {
   const test = useMutation({
     mutationFn: () => testProviderConnection({ data: { providerId } }),
     onSuccess: (r) => {
-      if (r.success) toast.success(`连接成功 · ${r.latencyMs ?? 0}ms`);
+      if (r.success) toast.success(`通用 models 连通性测试通过 · ${r.latencyMs ?? 0}ms`);
       else toast.error(r.message);
-      queryClient.invalidateQueries({ queryKey: ["activity"] });
     },
     onError: (e) => toast.error(e instanceof Error ? e.message : "测试失败"),
   });
@@ -93,59 +74,56 @@ function ProviderDetailPage() {
         >
           <ArrowLeft className="size-4" /> Providers
         </Link>
-        <h1 className="mt-2 text-xl font-semibold tracking-tight">{data.provider.name}</h1>
+        <h1 className="mt-2 text-xl font-semibold tracking-tight">{provider?.name}</h1>
       </div>
 
       <Card>
         <CardHeader className="pb-2">
-          <CardTitle className="text-sm">基本信息</CardTitle>
+          <CardTitle className="text-sm">基本信息与密钥</CardTitle>
         </CardHeader>
-        <CardContent>
-          <Field label="Slug">
-            <span className="font-mono text-xs">{data.provider.slug}</span>
-          </Field>
-          <Field label="类型">{data.provider.kind}</Field>
-          <Field label="Base URL">
-            <span className="font-mono text-xs">{data.provider.base_url ?? "—"}</span>
-          </Field>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader className="pb-2">
-          <CardTitle className="text-sm">密钥与启用状态</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-4">
+        <CardContent className="space-y-3">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="space-y-2">
+              <Label htmlFor="key">Key</Label>
+              <Input
+                id="key"
+                value={key}
+                onChange={(e) => setKey(e.target.value)}
+                className="font-mono text-sm"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="name">名称</Label>
+              <Input id="name" value={name} onChange={(e) => setName(e.target.value)} />
+            </div>
+          </div>
+          <div className="space-y-2">
+            <Label>Base URL</Label>
+            <Input value={provider?.base_url ?? ""} readOnly className="font-mono text-sm" />
+            <p className="text-xs text-muted-foreground">base_url 由数据库提供，此处只读展示。</p>
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="description">描述</Label>
+            <Input
+              id="description"
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+            />
+          </div>
           <div className="space-y-2">
             <Label htmlFor="secretRef">密钥引用（secret_ref）</Label>
             <Input
               id="secretRef"
               value={secretRef}
               onChange={(e) => setSecretRef(e.target.value)}
-              placeholder="例如 OPENAI_API_KEY（留空表示清除）"
+              placeholder="环境变量名（留空表示清除）"
               className="font-mono text-sm"
             />
-          </div>
-          <div className="space-y-2">
-            <Label>来源（secret_source）</Label>
-            <Select value={secretSource} onValueChange={(v) => setSecretSource(v as SecretSource)}>
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="cloudflare_env">cloudflare_env</SelectItem>
-                <SelectItem value="supabase_vault">supabase_vault</SelectItem>
-              </SelectContent>
-            </Select>
           </div>
           <div className="flex items-center justify-between rounded-lg border border-border px-3 py-2">
             <Label htmlFor="enabled">启用</Label>
             <Switch id="enabled" checked={enabled} onCheckedChange={setEnabled} />
           </div>
-
-          <p className="text-xs text-muted-foreground">
-            真实密钥不存于数据库：运行时按「来源」从 Cloudflare 绑定或 Supabase Vault 解析。
-          </p>
 
           <div className="flex gap-2">
             <Button onClick={() => save.mutate()} disabled={save.isPending}>
@@ -157,12 +135,9 @@ function ProviderDetailPage() {
               测试连接
             </Button>
           </div>
-
           {test.data && !test.isPending && (
             <p className={`text-xs ${test.data.success ? "text-emerald-600" : "text-destructive"}`}>
-              {test.data.success
-                ? `✓ ${test.data.message}（${test.data.latencyMs ?? 0}ms）`
-                : `✗ ${test.data.message}`}
+              {test.data.success ? `✓ ${test.data.message}` : `✗ ${test.data.message}`}
             </p>
           )}
         </CardContent>
@@ -184,20 +159,37 @@ function ProviderDetailPage() {
                     params={{ modelId: m.id }}
                     className="text-sm text-primary hover:underline"
                   >
-                    {m.display_name}
+                    {m.name}
                   </Link>
-                  <div className="flex items-center gap-2">
-                    <span className="font-mono text-xs text-muted-foreground">{m.upstream_id}</span>
-                    {m.enabled ? (
-                      <Badge variant="secondary" className="text-[10px]">
-                        启用
-                      </Badge>
-                    ) : (
-                      <Badge variant="secondary" className="text-[10px]">
-                        停用
-                      </Badge>
-                    )}
-                  </div>
+                  <span className="font-mono text-xs text-muted-foreground">{m.key}</span>
+                  <Badge variant="secondary" className="text-[10px]">
+                    {m.enabled ? "启用" : "停用"}
+                  </Badge>
+                </li>
+              ))}
+            </ul>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader className="pb-2">
+          <CardTitle className="text-sm">
+            该 Provider 下的工作流（{data.workflows.length}）
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          {data.workflows.length === 0 ? (
+            <p className="text-sm text-muted-foreground">暂无工作流</p>
+          ) : (
+            <ul className="space-y-2">
+              {data.workflows.map((w) => (
+                <li key={w.id} className="flex items-center justify-between gap-3">
+                  <span className="text-sm">{w.name}</span>
+                  <span className="font-mono text-xs text-muted-foreground">{w.key}</span>
+                  <Badge variant="secondary" className="text-[10px]">
+                    {w.enabled ? "启用" : "停用"}
+                  </Badge>
                 </li>
               ))}
             </ul>

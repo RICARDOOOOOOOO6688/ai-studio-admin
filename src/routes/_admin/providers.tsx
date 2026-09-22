@@ -17,13 +17,6 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import {
   Table,
   TableBody,
   TableCell,
@@ -32,7 +25,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { listProviders, testProviderConnection, updateProvider } from "@/lib/admin.functions";
-import type { Provider, SecretSource } from "@/lib/control-plane";
+import type { Provider } from "@/lib/control-plane";
 
 export const Route = createFileRoute("/_admin/providers")({
   component: ProvidersPage,
@@ -40,8 +33,10 @@ export const Route = createFileRoute("/_admin/providers")({
 
 function ProviderEditDialog({ provider, onClose }: { provider: Provider; onClose: () => void }) {
   const queryClient = useQueryClient();
+  const [key, setKey] = useState(provider.key);
+  const [name, setName] = useState(provider.name);
+  const [description, setDescription] = useState(provider.description);
   const [secretRef, setSecretRef] = useState(provider.secret_ref ?? "");
-  const [secretSource, setSecretSource] = useState<SecretSource>(provider.secret_source);
   const [enabled, setEnabled] = useState(provider.enabled);
 
   const mutation = useMutation({
@@ -49,8 +44,10 @@ function ProviderEditDialog({ provider, onClose }: { provider: Provider; onClose
       updateProvider({
         data: {
           providerId: provider.id,
+          key,
+          name,
+          description,
           secretRef: secretRef.trim() || null,
-          secretSource,
           enabled,
         },
       }),
@@ -67,44 +64,47 @@ function ProviderEditDialog({ provider, onClose }: { provider: Provider; onClose
       <DialogContent>
         <DialogHeader>
           <DialogTitle>编辑 {provider.name}</DialogTitle>
-          <DialogDescription>
-            只配置「密钥引用」，不写入密钥本身。真实值在运行时按来源解析。
-          </DialogDescription>
+          <DialogDescription>只配置密钥引用，不写入密钥本身。</DialogDescription>
         </DialogHeader>
 
         <div className="space-y-4">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="space-y-2">
+              <Label htmlFor="key">Key（逻辑标识）</Label>
+              <Input
+                id="key"
+                value={key}
+                onChange={(e) => setKey(e.target.value)}
+                className="font-mono text-sm"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="name">名称</Label>
+              <Input id="name" value={name} onChange={(e) => setName(e.target.value)} />
+            </div>
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="description">描述</Label>
+            <Input
+              id="description"
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+            />
+          </div>
           <div className="space-y-2">
             <Label htmlFor="secretRef">密钥引用（secret_ref）</Label>
             <Input
               id="secretRef"
               value={secretRef}
               onChange={(e) => setSecretRef(e.target.value)}
-              placeholder="例如 OPENAI_API_KEY（留空表示清除）"
+              placeholder="环境变量名，例如 DIFY_API_KEY（留空表示清除）"
               className="font-mono text-sm"
             />
           </div>
-          <div className="space-y-2">
-            <Label>来源（secret_source）</Label>
-            <Select value={secretSource} onValueChange={(v) => setSecretSource(v as SecretSource)}>
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="cloudflare_env">cloudflare_env</SelectItem>
-                <SelectItem value="supabase_vault">supabase_vault</SelectItem>
-              </SelectContent>
-            </Select>
-            <p className="text-xs text-muted-foreground">
-              supabase_vault 的密钥写入尚未连接（第二阶段仅结构 + 状态显示）。
-            </p>
-          </div>
           <div className="flex items-center justify-between rounded-lg border border-border px-3 py-2">
-            <Label htmlFor="enabled">启用此 Provider</Label>
+            <Label htmlFor="enabled">启用</Label>
             <Switch id="enabled" checked={enabled} onCheckedChange={setEnabled} />
           </div>
-          <p className="text-xs text-muted-foreground">
-            描述字段当前 schema 不支持，需要迁移后才有（见阶段报告）。
-          </p>
         </div>
 
         <DialogFooter>
@@ -142,9 +142,8 @@ function ProvidersPage() {
   const test = useMutation({
     mutationFn: (providerId: string) => testProviderConnection({ data: { providerId } }),
     onSuccess: (r) => {
-      if (r.success) toast.success(`连接成功 · ${r.latencyMs ?? 0}ms`);
+      if (r.success) toast.success(`通用 models 连通性测试通过 · ${r.latencyMs ?? 0}ms`);
       else toast.error(r.message);
-      queryClient.invalidateQueries({ queryKey: ["activity"] });
     },
     onError: (e) => toast.error(e instanceof Error ? e.message : "测试失败"),
   });
@@ -154,7 +153,7 @@ function ProvidersPage() {
       <div>
         <h1 className="text-xl font-semibold tracking-tight">Providers</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          Provider 与 Model 分层。密钥只存引用，不落库。
+          连接目标：base_url + secret_ref。Workflow / Model 通过 provider_key 逻辑归属。
         </p>
       </div>
 
@@ -163,9 +162,8 @@ function ProvidersPage() {
           <TableHeader>
             <TableRow>
               <TableHead>名称</TableHead>
-              <TableHead>类型</TableHead>
+              <TableHead>Base URL</TableHead>
               <TableHead>密钥引用</TableHead>
-              <TableHead>来源</TableHead>
               <TableHead>启用</TableHead>
               <TableHead className="text-right">操作</TableHead>
             </TableRow>
@@ -173,14 +171,14 @@ function ProvidersPage() {
           <TableBody>
             {isLoading && (
               <TableRow>
-                <TableCell colSpan={6} className="text-center text-sm text-muted-foreground">
+                <TableCell colSpan={5} className="text-center text-sm text-muted-foreground">
                   加载中…
                 </TableCell>
               </TableRow>
             )}
             {!isLoading && providers.length === 0 && (
               <TableRow>
-                <TableCell colSpan={6} className="text-center text-sm text-muted-foreground">
+                <TableCell colSpan={5} className="text-center text-sm text-muted-foreground">
                   暂无 Provider
                 </TableCell>
               </TableRow>
@@ -195,17 +193,14 @@ function ProvidersPage() {
                   >
                     {p.name}
                   </Link>
-                  <span className="ml-2 text-xs text-muted-foreground">{p.slug}</span>
+                  <span className="ml-2 font-mono text-xs text-muted-foreground">{p.key}</span>
                 </TableCell>
-                <TableCell className="text-sm text-muted-foreground">{p.kind}</TableCell>
                 <TableCell className="font-mono text-xs">
-                  {p.secret_ref ? (
-                    p.secret_ref
-                  ) : (
-                    <span className="text-muted-foreground">未配置</span>
-                  )}
+                  {p.base_url ?? <span className="text-muted-foreground">未配置</span>}
                 </TableCell>
-                <TableCell className="text-xs text-muted-foreground">{p.secret_source}</TableCell>
+                <TableCell className="font-mono text-xs">
+                  {p.secret_ref ?? <span className="text-muted-foreground">未配置</span>}
+                </TableCell>
                 <TableCell>
                   <Switch
                     checked={p.enabled}
@@ -243,7 +238,8 @@ function ProvidersPage() {
       {editing && <ProviderEditDialog provider={editing} onClose={() => setEditing(null)} />}
 
       <p className="text-xs text-muted-foreground">
-        说明：Provider 状态为「启用」不代表可用——还需配置对应 Model 与可解析的密钥。
+        说明：「测试连接」是通用 <code className="font-mono">/models</code>{" "}
+        连通性测试，不代表已验证任何具体 Provider 类型。
       </p>
     </div>
   );

@@ -4,7 +4,7 @@ import { AlertTriangle, CheckCircle2, Clock } from "lucide-react";
 
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { getAlerts, getCapabilities, getSystemStatus, listActivity } from "@/lib/admin.functions";
+import { getAlerts, getCapabilities, getSystemStatus, listRecentRuns } from "@/lib/admin.functions";
 import type { HealthState } from "@/lib/control-plane";
 
 export const Route = createFileRoute("/_admin/")({
@@ -24,9 +24,9 @@ function DashboardPage() {
     queryFn: () => getSystemStatus(),
   });
   const { data: caps } = useQuery({ queryKey: ["capabilities"], queryFn: () => getCapabilities() });
-  const { data: activity = [] } = useQuery({
-    queryKey: ["activity"],
-    queryFn: () => listActivity(),
+  const { data: runs = [] } = useQuery({
+    queryKey: ["recent-runs"],
+    queryFn: () => listRecentRuns(),
   });
   const { data: alerts = [] } = useQuery({ queryKey: ["alerts"], queryFn: () => getAlerts() });
 
@@ -40,7 +40,7 @@ function DashboardPage() {
       {/* ① 系统状态 */}
       <section>
         <h2 className="mb-3 text-sm font-medium text-muted-foreground">① AI 系统现在正常吗？</h2>
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <div className="grid gap-4 sm:grid-cols-3">
           {status.map((item) => (
             <Card key={item.key}>
               <CardContent className="p-4">
@@ -59,7 +59,21 @@ function DashboardPage() {
       {/* ② AI 能力 */}
       <section>
         <h2 className="mb-3 text-sm font-medium text-muted-foreground">② 现在有哪些 AI 能力？</h2>
-        <div className="grid gap-4 sm:grid-cols-2">
+        <div className="grid gap-4 sm:grid-cols-3">
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm">Providers</CardTitle>
+            </CardHeader>
+            <CardContent className="flex items-end gap-6">
+              <div>
+                <p className="text-2xl font-semibold">{caps?.providers.enabled ?? 0}</p>
+                <p className="text-xs text-muted-foreground">已启用</p>
+              </div>
+              <div className="ml-auto text-xs text-muted-foreground">
+                共 {caps?.providers.total ?? 0} 个
+              </div>
+            </CardContent>
+          </Card>
           <Card>
             <CardHeader className="pb-2">
               <CardTitle className="text-sm">Models</CardTitle>
@@ -106,27 +120,32 @@ function DashboardPage() {
           <h2 className="mb-3 text-sm font-medium text-muted-foreground">③ 最近发生了什么？</h2>
           <Card>
             <CardContent className="p-4">
-              {activity.length === 0 ? (
+              {runs.length === 0 ? (
                 <div className="flex flex-col items-center gap-2 py-8 text-center">
                   <Clock className="size-5 text-muted-foreground" />
-                  <p className="text-sm text-muted-foreground">暂无活动记录</p>
+                  <p className="text-sm text-muted-foreground">暂无运行记录</p>
                   <p className="text-xs text-muted-foreground">
-                    activity_events 表已就绪，等待 Gateway 写入
+                    usage_events 已就绪，等待 Gateway 写入
                   </p>
                 </div>
               ) : (
                 <ul className="space-y-3">
-                  {activity.map((ev) => (
-                    <li key={ev.id} className="flex items-start gap-3 text-sm">
+                  {runs.map((r) => (
+                    <li key={r.id} className="flex items-start gap-3 text-sm">
                       <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-primary" />
                       <div className="min-w-0 flex-1">
-                        <p className="truncate">{ev.title}</p>
+                        <p className="truncate">
+                          {r.workflow_key ?? "(未标记)"}
+                          <span className="ml-2 text-xs text-muted-foreground">
+                            {r.provider_key ?? ""}
+                          </span>
+                        </p>
                         <p className="text-xs text-muted-foreground">
-                          {new Date(ev.created_at).toLocaleString("zh-CN")}
+                          {new Date(r.created_at).toLocaleString("zh-CN")}
                         </p>
                       </div>
                       <Badge variant="secondary" className="shrink-0 text-[10px]">
-                        {ev.type}
+                        {r.input_tokens + r.output_tokens} tok
                       </Badge>
                     </li>
                   ))}
@@ -170,15 +189,15 @@ function DashboardPage() {
       </div>
 
       <p className="text-xs text-muted-foreground">
-        提示：管理 Provider / Model 请前往{" "}
+        提示：在{" "}
         <Link to="/providers" className="text-primary hover:underline">
           Providers
         </Link>{" "}
         与{" "}
-        <Link to="/models" className="text-primary hover:underline">
-          Models
-        </Link>
-        。
+        <Link to="/workflows" className="text-primary hover:underline">
+          Workflows
+        </Link>{" "}
+        配置执行链。
       </p>
     </div>
   );

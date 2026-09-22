@@ -12,14 +12,13 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { getModel, updateModel } from "@/lib/admin.functions";
-import { CAPABILITY_LABELS, SLOT_LABELS, type ModelStatus } from "@/lib/control-plane";
+import { CAPABILITY_LABELS, type ModelStatus } from "@/lib/control-plane";
 
 export const Route = createFileRoute("/_admin/models/$modelId")({
   component: ModelDetailPage,
 });
 
 const ALL_CAPABILITIES = ["chat", "reasoning", "vision", "tool_calling"];
-const ALL_SLOTS = ["navigator", "research", "product", "architecture", "build"];
 
 const STATUS_LABEL: Record<ModelStatus, string> = {
   enabled: "已启用",
@@ -43,39 +42,24 @@ function ModelDetailPage() {
     queryFn: () => getModel({ data: { modelId } }),
   });
 
-  const [displayName, setDisplayName] = useState("");
-  const [modelKey, setModelKey] = useState("");
-  const [upstreamId, setUpstreamId] = useState("");
+  const [key, setKey] = useState("");
+  const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [enabled, setEnabled] = useState(false);
   const [capabilities, setCapabilities] = useState<string[]>([]);
-  const [slots, setSlots] = useState<string[]>([]);
 
   useEffect(() => {
     if (!model) return;
-    setDisplayName(model.display_name);
-    setModelKey(model.model_key);
-    setUpstreamId(model.upstream_id);
+    setKey(model.key);
+    setName(model.name);
     setDescription(model.description);
     setEnabled(model.enabled);
     setCapabilities(model.capabilities);
-    setSlots(model.slots);
   }, [model]);
 
   const save = useMutation({
     mutationFn: () =>
-      updateModel({
-        data: {
-          modelId,
-          displayName,
-          modelKey,
-          upstreamId,
-          description,
-          enabled,
-          capabilities,
-          slots,
-        },
-      }),
+      updateModel({ data: { modelId, key, name, description, enabled, capabilities } }),
     onSuccess: () => {
       toast.success("已保存");
       queryClient.invalidateQueries();
@@ -96,7 +80,7 @@ function ModelDetailPage() {
           <ArrowLeft className="size-4" /> Models
         </Link>
         <div className="mt-2 flex items-center gap-3">
-          <h1 className="text-xl font-semibold tracking-tight">{model.display_name}</h1>
+          <h1 className="text-xl font-semibold tracking-tight">{model.name}</h1>
           <Badge
             className={
               model.status === "enabled"
@@ -119,31 +103,18 @@ function ModelDetailPage() {
         <CardContent className="space-y-3">
           <div className="grid gap-3 sm:grid-cols-2">
             <div className="space-y-2">
-              <Label htmlFor="displayName">显示名称</Label>
+              <Label htmlFor="key">Key</Label>
               <Input
-                id="displayName"
-                value={displayName}
-                onChange={(e) => setDisplayName(e.target.value)}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="modelKey">模型 Key</Label>
-              <Input
-                id="modelKey"
-                value={modelKey}
-                onChange={(e) => setModelKey(e.target.value)}
+                id="key"
+                value={key}
+                onChange={(e) => setKey(e.target.value)}
                 className="font-mono text-sm"
               />
             </div>
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="upstreamId">模型 ID（Provider 侧）</Label>
-            <Input
-              id="upstreamId"
-              value={upstreamId}
-              onChange={(e) => setUpstreamId(e.target.value)}
-              className="font-mono text-sm"
-            />
+            <div className="space-y-2">
+              <Label htmlFor="name">名称</Label>
+              <Input id="name" value={name} onChange={(e) => setName(e.target.value)} />
+            </div>
           </div>
           <div className="space-y-2">
             <Label htmlFor="description">描述</Label>
@@ -164,7 +135,7 @@ function ModelDetailPage() {
                 {model.provider.name}
               </Link>
             ) : (
-              "—"
+              "未关联"
             )}
           </div>
         </CardContent>
@@ -189,23 +160,6 @@ function ModelDetailPage() {
 
       <Card>
         <CardHeader className="pb-2">
-          <CardTitle className="text-sm">可用于</CardTitle>
-        </CardHeader>
-        <CardContent className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-          {ALL_SLOTS.map((s) => (
-            <label key={s} className="flex items-center gap-2 text-sm">
-              <Checkbox
-                checked={slots.includes(s)}
-                onCheckedChange={() => setSlots((prev) => toggle(prev, s))}
-              />
-              {SLOT_LABELS[s] ?? s}
-            </label>
-          ))}
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader className="pb-2">
           <CardTitle className="text-sm">使用状态</CardTitle>
         </CardHeader>
         <CardContent className="space-y-3">
@@ -214,7 +168,7 @@ function ModelDetailPage() {
             <Switch id="enabled" checked={enabled} onCheckedChange={setEnabled} />
           </div>
           <p className="text-xs text-muted-foreground">
-            「已启用」不等于可调用：还需 Provider 启用且 secret_ref 可解析。
+            模型目录不参与 Dify 执行；实际模型由 Dify 决定。
           </p>
           <Button onClick={() => save.mutate()} disabled={save.isPending}>
             {save.isPending && <Loader2 className="animate-spin" />}

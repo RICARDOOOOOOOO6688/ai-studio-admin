@@ -1,29 +1,26 @@
-// Admin server functions — phase 1: READ ONLY.
+// Admin server functions, aligned with the authoritative ai_* control plane.
 //
-// Every function is gated by `requireAdmin`, which runs on the server and
-// rejects anyone whose `user_roles.role` is not `admin`. The guard is enforced
-// here, not in the UI, so hiding a menu item is never the security boundary.
-//
-// No writes, no secret reads/writes, no provider calls in this phase.
+// Every function is gated by `requireAdmin` (server-side, user_roles.role).
+// No quota (user_quotas has no confirmed fields), no activity_events.
+// Run/usage data comes from usage_events.
 
 import { createMiddleware, createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import type {
-  ActivityEvent,
   AdminUser,
   AlertItem,
   CapabilitySummary,
   HealthItem,
-  KnowledgeBase,
   Model,
   ModelStatus,
   ModelWithProvider,
   Provider,
-  QuotaInfo,
   Role,
   UsageEvent,
+  UsageSummary,
   Workflow,
+  WorkflowWithProvider,
 } from "@/lib/control-plane";
 
 // --- guard -------------------------------------------------------------------
@@ -39,19 +36,13 @@ export const requireAdmin = createMiddleware({ type: "function" })
       .maybeSingle();
     if (error) throw new Error(error.message);
     const role = (data as { role?: Role } | null)?.role;
-    if (role !== "admin") {
-      throw new Error("Forbidden: admin role required");
-    }
+    if (role !== "admin") throw new Error("Forbidden: admin role required");
     return next({ context: { ...context, role } });
   });
 
 async function adminClient() {
   const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
   return supabaseAdmin;
-}
-
-async function loadOps() {
-  return import("@/lib/admin-ops.server");
 }
 
 // --- session -----------------------------------------------------------------
@@ -67,6 +58,20 @@ export const getAdminSession = createServerFn({ method: "GET" })
     };
   });
 
+// --- helpers -----------------------------------------------------------------
+
+type ProviderLite = Pick<Provider, "id" | "key" | "name" | "base_url" | "enabled" | "secret_ref">;
+
+function hasSecret(p: { secret_ref: string | null } | null | undefined): boolean {
+  return Boolean(p?.secret_ref && p.secret_ref.trim());
+}
+
+function workflowConnected(w: Workflow, provider: ProviderLite | null): boolean {
+  if (!w.enabled) return false;
+  if (!provider || !provider.enabled || !provider.base_url?.trim()) return false;
+  return Boolean((w.secret_ref && w.secret_ref.trim()) || hasSecret(provider));
+}
+
 // --- homepage: ① system status ----------------------------------------------
 
 function readCloudflareInfo(): { version: string | null; deployedAt: string | null } {
@@ -74,12 +79,9 @@ function readCloudflareInfo(): { version: string | null; deployedAt: string | nu
   if (raw) {
     try {
       const parsed = JSON.parse(raw) as { id?: string; tag?: string; timestamp?: string };
-      return {
-        version: parsed.tag ?? parsed.id ?? null,
-        deployedAt: parsed.timestamp ?? null,
-      };
+      return { version: parsed.tag ?? parsed.id ?? null, deployedAt: parsed.timestamp ?? null };
     } catch {
-      // not JSON — fall through to explicit deploy vars
+      // fall through
     }
   }
   return {
@@ -99,16 +101,34 @@ export const getSystemStatus = createServerFn({ method: "GET" })
       state: "down",
       detail: "连接失败",
     };
-    const ping = await db.from("providers").select("id").limit(1);
+    const ping = await db.from("ai_providers").select("id").limit(1);
     if (!ping.error)
       supabaseState = { key: "supabase", label: "Supabase", state: "ok", detail: "正常" };
 
-    const difyConfigured = Boolean(process.env["DIFY_API_KEY"]?.trim());
+    // Dify = at least one enabled workflow whose provider is usable.
+    const [wfRes, pvRes] = await Promise.all([
+      db.from("ai_workflows").select("id, enabled, secret_ref, provider_key"),
+      db.from("ai_providers").select("id, key, name, base_url, enabled, secret_ref"),
+    ]);
+    const providers = (pvRes.data ?? []) as unknown as ProviderLite[];
+    const providerByKey = new Map(providers.map((p) => [p.key, p]));
+    const workflows = (wfRes.data ?? []) as unknown as Pick<
+      Workflow,
+      "id" | "enabled" | "secret_ref" | "provider_key"
+    >[];
+    const ready = workflows.filter((w) => {
+      const p = w.provider_key ? providerByKey.get(w.provider_key) : null;
+      return workflowConnected(w as unknown as Workflow, p ?? null);
+    }).length;
     const difyState: HealthItem = {
       key: "dify",
       label: "Dify",
-      state: difyConfigured ? "ok" : "warn",
-      detail: difyConfigured ? "已配置" : "未配置 DIFY_API_KEY",
+      state: wfRes.error ? "down" : ready > 0 ? "ok" : "warn",
+      detail: wfRes.error
+        ? "查询失败"
+        : ready > 0
+          ? `${ready} 个工作流已配置`
+          : "暂无可用的工作流配置",
     };
 
     const cf = readCloudflareInfo();
@@ -127,16 +147,7 @@ export const getSystemStatus = createServerFn({ method: "GET" })
           : "未接入部署信息",
     };
 
-    const kb = await db.from("knowledge_bases").select("id").eq("enabled", true);
-    const kbCount = kb.error ? 0 : ((kb.data ?? []) as unknown[]).length;
-    const kbState: HealthItem = {
-      key: "knowledge",
-      label: "Knowledge",
-      state: kb.error ? "down" : kbCount > 0 ? "ok" : "warn",
-      detail: kb.error ? "查询失败" : kbCount > 0 ? `${kbCount} 个已启用` : "未配置知识库",
-    };
-
-    return [supabaseState, difyState, cfState, kbState];
+    return [supabaseState, difyState, cfState];
   });
 
 // --- homepage: ② capabilities -------------------------------------------------
@@ -145,112 +156,134 @@ export const getCapabilities = createServerFn({ method: "GET" })
   .middleware([requireAdmin])
   .handler(async (): Promise<CapabilitySummary> => {
     const db = await adminClient();
+    const [pvRes, mdRes, wfRes] = await Promise.all([
+      db.from("ai_providers").select("id, key, name, base_url, enabled, secret_ref"),
+      db.from("ai_models").select("id, enabled, provider_key"),
+      db.from("ai_workflows").select("id, enabled, secret_ref, provider_key"),
+    ]);
 
-    const providersRes = await db.from("providers").select("id, secret_ref");
-    const providers = (providersRes.data ?? []) as unknown as Pick<Provider, "id" | "secret_ref">[];
-    const providersWithSecret = new Set(
-      providers.filter((p) => p.secret_ref && p.secret_ref.trim()).map((p) => p.id),
-    );
+    const providers = (pvRes.data ?? []) as unknown as ProviderLite[];
+    const providerByKey = new Map(providers.map((p) => [p.key, p]));
+    const providersWithSecret = new Set(providers.filter(hasSecret).map((p) => p.key));
 
-    const modelsRes = await db.from("models").select("id, enabled, provider_id");
-    const models = (modelsRes.data ?? []) as unknown as Pick<
+    const models = (mdRes.data ?? []) as unknown as Pick<
       Model,
-      "id" | "enabled" | "provider_id"
+      "id" | "enabled" | "provider_key"
     >[];
-
-    const workflowsRes = await db.from("workflows").select("id, dify_app_id, secret_ref");
-    const workflows = (workflowsRes.data ?? []) as unknown as Pick<
+    const workflows = (wfRes.data ?? []) as unknown as Pick<
       Workflow,
-      "id" | "dify_app_id" | "secret_ref"
+      "id" | "enabled" | "secret_ref" | "provider_key"
     >[];
-    const connected = workflows.filter((w) => w.dify_app_id && w.secret_ref).length;
+    const connected = workflows.filter((w) => {
+      const p = w.provider_key ? providerByKey.get(w.provider_key) : null;
+      return workflowConnected(w as unknown as Workflow, p ?? null);
+    }).length;
 
     return {
+      providers: { total: providers.length, enabled: providers.filter((p) => p.enabled).length },
       models: {
         total: models.length,
         enabled: models.filter((m) => m.enabled).length,
-        configured: models.filter((m) => providersWithSecret.has(m.provider_id)).length,
+        configured: models.filter((m) => m.provider_key && providersWithSecret.has(m.provider_key))
+          .length,
       },
-      workflows: {
-        total: workflows.length,
-        connected,
-        pending: workflows.length - connected,
-      },
+      workflows: { total: workflows.length, connected, pending: workflows.length - connected },
     };
   });
 
-// --- homepage: ③ recent activity ---------------------------------------------
+// --- homepage: ③ recent runs (usage_events) ----------------------------------
 
-export const listActivity = createServerFn({ method: "GET" })
+export const listRecentRuns = createServerFn({ method: "GET" })
   .middleware([requireAdmin])
-  .handler(async (): Promise<ActivityEvent[]> => {
+  .handler(async (): Promise<UsageEvent[]> => {
     const db = await adminClient();
     const { data, error } = await db
-      .from("activity_events")
+      .from("usage_events")
       .select("*")
       .order("created_at", { ascending: false })
       .limit(20);
     if (error) throw new Error(error.message);
-    return (data ?? []) as unknown as ActivityEvent[];
+    return (data ?? []) as unknown as UsageEvent[];
   });
 
-// --- homepage: ④ alerts (computed from config, not stored) --------------------
+// --- homepage: ④ alerts (computed from ai_* config) ---------------------------
 
 export const getAlerts = createServerFn({ method: "GET" })
   .middleware([requireAdmin])
   .handler(async (): Promise<AlertItem[]> => {
     const db = await adminClient();
-    const [providersRes, modelsRes, workflowsRes] = await Promise.all([
-      db.from("providers").select("id, name, enabled, secret_ref"),
-      db.from("models").select("id, display_name, enabled, provider_id"),
-      db.from("workflows").select("id, label, enabled, dify_app_id, secret_ref"),
+    const [pvRes, mdRes, wfRes] = await Promise.all([
+      db.from("ai_providers").select("id, key, name, base_url, enabled, secret_ref"),
+      db.from("ai_models").select("id, name, enabled, provider_key"),
+      db.from("ai_workflows").select("id, key, name, enabled, secret_ref, provider_key"),
     ]);
 
-    const providers = (providersRes.data ?? []) as unknown as Pick<
-      Provider,
-      "id" | "name" | "enabled" | "secret_ref"
-    >[];
-    const models = (modelsRes.data ?? []) as unknown as Pick<
+    const providers = (pvRes.data ?? []) as unknown as ProviderLite[];
+    const providerByKey = new Map(providers.map((p) => [p.key, p]));
+    const models = (mdRes.data ?? []) as unknown as Pick<
       Model,
-      "id" | "display_name" | "enabled" | "provider_id"
+      "id" | "name" | "enabled" | "provider_key"
     >[];
-    const workflows = (workflowsRes.data ?? []) as unknown as Pick<
+    const workflows = (wfRes.data ?? []) as unknown as Pick<
       Workflow,
-      "id" | "label" | "enabled" | "dify_app_id" | "secret_ref"
+      "id" | "key" | "name" | "enabled" | "secret_ref" | "provider_key"
     >[];
 
-    const providerById = new Map(providers.map((p) => [p.id, p]));
     const alerts: AlertItem[] = [];
 
-    for (const w of workflows) {
-      if (w.enabled && (!w.dify_app_id || !w.secret_ref)) {
+    for (const p of providers) {
+      if (p.enabled && !p.base_url?.trim()) {
         alerts.push({
           severity: "warning",
-          title: `${w.label} Workflow 配置缺失`,
-          detail: !w.dify_app_id ? "缺少 Dify App ID" : "缺少密钥引用",
+          title: `${p.name} 未配置 base_url`,
+          detail: "Provider 已启用，但没有连接地址",
         });
       }
     }
 
-    for (const p of providers) {
-      if (p.enabled && !p.secret_ref?.trim()) {
+    for (const w of workflows) {
+      if (!w.enabled) continue;
+      const p = w.provider_key ? providerByKey.get(w.provider_key) : null;
+      if (!w.provider_key || !p) {
         alerts.push({
           severity: "warning",
-          title: `${p.name} 未配置密钥`,
-          detail: "Provider 已启用，但没有 secret_ref",
+          title: `${w.name} 未关联 Provider`,
+          detail: "工作流已启用，但 provider_key 为空或找不到对应 Provider",
+        });
+        continue;
+      }
+      if (!p.enabled) {
+        alerts.push({
+          severity: "warning",
+          title: `${w.name} 的 Provider 已停用`,
+          detail: p.name,
+        });
+        continue;
+      }
+      if (!p.base_url?.trim()) {
+        alerts.push({
+          severity: "warning",
+          title: `${w.name} 的 Provider 未配置地址`,
+          detail: p.name,
+        });
+      }
+      if (!(w.secret_ref?.trim() || p.secret_ref?.trim())) {
+        alerts.push({
+          severity: "warning",
+          title: `${w.name} 未配置密钥`,
+          detail: "workflow 与 provider 的 secret_ref 均为空",
         });
       }
     }
 
     for (const m of models) {
       if (!m.enabled) continue;
-      const p = providerById.get(m.provider_id);
-      if (!p) continue;
-      if (!p.enabled || !p.secret_ref?.trim()) {
+      const p = m.provider_key ? providerByKey.get(m.provider_key) : null;
+      if (!p || !p.enabled || !hasSecret(p)) {
         alerts.push({
           severity: "warning",
-          title: `模型 ${m.display_name} 的 Provider 不可用`,
-          detail: `${p.name} 未启用或缺少密钥`,
+          title: `模型 ${m.name} 的 Provider 不可用`,
+          detail: !p ? "未关联 Provider" : "Provider 未启用或缺少 secret_ref",
         });
       }
     }
@@ -260,14 +293,17 @@ export const getAlerts = createServerFn({ method: "GET" })
 
 // --- providers ---------------------------------------------------------------
 
+const PROVIDER_COLUMNS =
+  "id, key, name, description, base_url, secret_ref, enabled, created_at, updated_at";
+
 export const listProviders = createServerFn({ method: "GET" })
   .middleware([requireAdmin])
   .handler(async (): Promise<Provider[]> => {
     const db = await adminClient();
     const { data, error } = await db
-      .from("providers")
-      .select("*")
-      .order("sort_order", { ascending: true });
+      .from("ai_providers")
+      .select(PROVIDER_COLUMNS)
+      .order("name", { ascending: true });
     if (error) throw new Error(error.message);
     return (data ?? []) as unknown as Provider[];
   });
@@ -275,25 +311,38 @@ export const listProviders = createServerFn({ method: "GET" })
 export const getProvider = createServerFn({ method: "GET" })
   .middleware([requireAdmin])
   .inputValidator((input: unknown) => z.object({ providerId: z.string() }).parse(input))
-  .handler(async ({ data }): Promise<{ provider: Provider; models: Model[] }> => {
-    const db = await adminClient();
-    const { data: provider, error } = await db
-      .from("providers")
-      .select("*")
-      .eq("id", data.providerId)
-      .maybeSingle();
-    if (error) throw new Error(error.message);
-    if (!provider) throw new Error("Provider 不存在");
-    const modelsRes = await db
-      .from("models")
-      .select("*")
-      .eq("provider_id", data.providerId)
-      .order("sort_order", { ascending: true });
-    return {
-      provider: provider as unknown as Provider,
-      models: (modelsRes.data ?? []) as unknown as Model[],
-    };
-  });
+  .handler(
+    async ({ data }): Promise<{ provider: Provider; models: Model[]; workflows: Workflow[] }> => {
+      const db = await adminClient();
+      const { data: provider, error } = await db
+        .from("ai_providers")
+        .select(PROVIDER_COLUMNS)
+        .eq("id", data.providerId)
+        .maybeSingle();
+      if (error) throw new Error(error.message);
+      if (!provider) throw new Error("Provider 不存在");
+      const typed = provider as unknown as Provider;
+
+      const [modelsRes, workflowsRes] = await Promise.all([
+        db
+          .from("ai_models")
+          .select("*")
+          .eq("provider_key", typed.key)
+          .order("sort_order", { ascending: true }),
+        db
+          .from("ai_workflows")
+          .select("*")
+          .eq("provider_key", typed.key)
+          .order("sort_order", { ascending: true }),
+      ]);
+
+      return {
+        provider: typed,
+        models: (modelsRes.data ?? []) as unknown as Model[],
+        workflows: (workflowsRes.data ?? []) as unknown as Workflow[],
+      };
+    },
+  );
 
 // --- models ------------------------------------------------------------------
 
@@ -302,23 +351,27 @@ export const listModels = createServerFn({ method: "GET" })
   .handler(async (): Promise<ModelWithProvider[]> => {
     const db = await adminClient();
     const [modelsRes, providersRes] = await Promise.all([
-      db.from("models").select("*").order("sort_order", { ascending: true }),
-      db.from("providers").select("id, name, slug, enabled, secret_ref"),
+      db.from("ai_models").select("*").order("sort_order", { ascending: true }),
+      db.from("ai_providers").select("id, key, name, base_url, enabled, secret_ref"),
     ]);
     if (modelsRes.error) throw new Error(modelsRes.error.message);
-    const providers = (providersRes.data ?? []) as unknown as Pick<
-      Provider,
-      "id" | "name" | "slug" | "enabled" | "secret_ref"
-    >[];
-    const byId = new Map(providers.map((p) => [p.id, p]));
+    const providers = (providersRes.data ?? []) as unknown as ProviderLite[];
+    const byKey = new Map(providers.map((p) => [p.key, p]));
+
     return ((modelsRes.data ?? []) as unknown as Model[]).map((m) => {
-      const provider = byId.get(m.provider_id) ?? null;
+      const p = m.provider_key ? byKey.get(m.provider_key) : null;
       const status: ModelStatus = !m.enabled
         ? "disabled"
-        : !provider?.enabled || !provider.secret_ref
+        : !p || !p.enabled || !hasSecret(p)
           ? "provider_unavailable"
           : "enabled";
-      return { ...m, provider, status };
+      return {
+        ...m,
+        provider: p
+          ? { id: p.id, key: p.key, name: p.name, enabled: p.enabled, secret_ref: p.secret_ref }
+          : null,
+        status,
+      };
     });
   });
 
@@ -328,22 +381,36 @@ export const getModel = createServerFn({ method: "GET" })
   .handler(async ({ data }): Promise<ModelWithProvider> => {
     const db = await adminClient();
     const { data: model, error } = await db
-      .from("models")
+      .from("ai_models")
       .select("*")
       .eq("id", data.modelId)
       .maybeSingle();
     if (error) throw new Error(error.message);
     if (!model) throw new Error("模型不存在");
     const typed = model as unknown as Model;
-    const providerRes = await db
-      .from("providers")
-      .select("id, name, slug, enabled, secret_ref")
-      .eq("id", typed.provider_id)
-      .maybeSingle();
-    const provider = (providerRes.data as unknown as ModelWithProvider["provider"]) ?? null;
+
+    let provider: ModelWithProvider["provider"] = null;
+    if (typed.provider_key) {
+      const pvRes = await db
+        .from("ai_providers")
+        .select("id, key, name, base_url, enabled, secret_ref")
+        .eq("key", typed.provider_key)
+        .maybeSingle();
+      const p = pvRes.data as unknown as ProviderLite | null;
+      if (p) {
+        provider = {
+          id: p.id,
+          key: p.key,
+          name: p.name,
+          enabled: p.enabled,
+          secret_ref: p.secret_ref,
+        };
+      }
+    }
+
     const status: ModelStatus = !typed.enabled
       ? "disabled"
-      : !provider?.enabled || !provider.secret_ref
+      : !provider || !provider.enabled || !hasSecret(provider)
         ? "provider_unavailable"
         : "enabled";
     return { ...typed, provider, status };
@@ -353,28 +420,33 @@ export const getModel = createServerFn({ method: "GET" })
 
 export const listWorkflows = createServerFn({ method: "GET" })
   .middleware([requireAdmin])
-  .handler(async (): Promise<Workflow[]> => {
+  .handler(async (): Promise<WorkflowWithProvider[]> => {
     const db = await adminClient();
-    const { data, error } = await db
-      .from("workflows")
-      .select("*")
-      .order("sort_order", { ascending: true });
-    if (error) throw new Error(error.message);
-    return (data ?? []) as unknown as Workflow[];
-  });
+    const [wfRes, pvRes] = await Promise.all([
+      db.from("ai_workflows").select("*").order("sort_order", { ascending: true }),
+      db.from("ai_providers").select("id, key, name, base_url, enabled, secret_ref"),
+    ]);
+    if (wfRes.error) throw new Error(wfRes.error.message);
+    const providers = (pvRes.data ?? []) as unknown as ProviderLite[];
+    const byKey = new Map(providers.map((p) => [p.key, p]));
 
-// --- knowledge ---------------------------------------------------------------
-
-export const listKnowledgeBases = createServerFn({ method: "GET" })
-  .middleware([requireAdmin])
-  .handler(async (): Promise<KnowledgeBase[]> => {
-    const db = await adminClient();
-    const { data, error } = await db
-      .from("knowledge_bases")
-      .select("*")
-      .order("sort_order", { ascending: true });
-    if (error) throw new Error(error.message);
-    return (data ?? []) as unknown as KnowledgeBase[];
+    return ((wfRes.data ?? []) as unknown as Workflow[]).map((w) => {
+      const p = w.provider_key ? byKey.get(w.provider_key) : null;
+      return {
+        ...w,
+        provider: p
+          ? {
+              id: p.id,
+              key: p.key,
+              name: p.name,
+              base_url: p.base_url,
+              enabled: p.enabled,
+              secret_ref: p.secret_ref,
+            }
+          : null,
+        connected: workflowConnected(w, p ?? null),
+      };
+    });
   });
 
 // --- users -------------------------------------------------------------------
@@ -385,44 +457,20 @@ export const listUsers = createServerFn({ method: "GET" })
     const db = await adminClient();
     const { data, error } = await db.auth.admin.listUsers({ page: 1, perPage: 200 });
     if (error) throw new Error(error.message);
-
-    const [rolesRes, quotasRes] = await Promise.all([
-      db.from("user_roles").select("user_id, role"),
-      db.from("user_quotas").select("user_id, token_used, token_limit, cost_used"),
-    ]);
+    const rolesRes = await db.from("user_roles").select("user_id, role");
     const roles = (rolesRes.data ?? []) as unknown as { user_id: string; role: Role }[];
-    const quotas = (quotasRes.data ?? []) as unknown as {
-      user_id: string;
-      token_used: number;
-      token_limit: number | null;
-      cost_used: number;
-    }[];
     const roleById = new Map(roles.map((r) => [r.user_id, r.role]));
-    const quotaById = new Map(quotas.map((q) => [q.user_id, q]));
 
-    return data.users.map((u) => {
-      const q = quotaById.get(u.id);
-      return {
-        id: u.id,
-        email: u.email ?? null,
-        role: roleById.get(u.id) ?? "user",
-        created_at: u.created_at ?? null,
-        last_sign_in_at: u.last_sign_in_at ?? null,
-        token_used: q?.token_used ?? 0,
-        token_limit: q?.token_limit ?? null,
-        cost_used: q?.cost_used ?? 0,
-      };
-    });
+    return data.users.map((u) => ({
+      id: u.id,
+      email: u.email ?? null,
+      role: roleById.get(u.id) ?? "user",
+      created_at: u.created_at ?? null,
+      last_sign_in_at: u.last_sign_in_at ?? null,
+    }));
   });
 
 // --- usage -------------------------------------------------------------------
-
-export interface UsageSummary {
-  events: number;
-  totalTokens: number;
-  totalCost: number;
-  byCapability: { capability: string; tokens: number; cost: number; events: number }[];
-}
 
 export const getUsageSummary = createServerFn({ method: "GET" })
   .middleware([requireAdmin])
@@ -430,42 +478,43 @@ export const getUsageSummary = createServerFn({ method: "GET" })
     const db = await adminClient();
     const { data, error } = await db
       .from("usage_events")
-      .select("capability, tokens_in, tokens_out, cost");
+      .select("workflow_key, input_tokens, output_tokens");
     if (error) throw new Error(error.message);
     const rows = (data ?? []) as unknown as Pick<
       UsageEvent,
-      "capability" | "tokens_in" | "tokens_out" | "cost"
+      "workflow_key" | "input_tokens" | "output_tokens"
     >[];
 
-    const map = new Map<string, { tokens: number; cost: number; events: number }>();
-    let totalTokens = 0;
-    let totalCost = 0;
+    const map = new Map<string, { input: number; output: number; events: number }>();
+    let totalInput = 0;
+    let totalOutput = 0;
     for (const r of rows) {
-      const tokens = (r.tokens_in ?? 0) + (r.tokens_out ?? 0);
-      const cost = Number(r.cost ?? 0);
-      totalTokens += tokens;
-      totalCost += cost;
-      const cur = map.get(r.capability) ?? { tokens: 0, cost: 0, events: 0 };
-      cur.tokens += tokens;
-      cur.cost += cost;
+      const input = r.input_tokens ?? 0;
+      const output = r.output_tokens ?? 0;
+      totalInput += input;
+      totalOutput += output;
+      const key = r.workflow_key ?? "(未标记)";
+      const cur = map.get(key) ?? { input: 0, output: 0, events: 0 };
+      cur.input += input;
+      cur.output += output;
       cur.events += 1;
-      map.set(r.capability, cur);
+      map.set(key, cur);
     }
 
     return {
       events: rows.length,
-      totalTokens,
-      totalCost,
-      byCapability: [...map.entries()].map(([capability, v]) => ({ capability, ...v })),
+      totalInput,
+      totalOutput,
+      byWorkflow: [...map.entries()].map(([workflowKey, v]) => ({ workflowKey, ...v })),
     };
   });
 
 // =============================================================================
-// Phase 2 — writes, connection tests, quotas
+// Writes + connection tests
 //
 // Every mutation re-reads the target server-side, applies only the provided
-// fields, records an audit entry in activity_events, and returns a small status
-// object. No secret value is ever read into a response or written to the DB.
+// fields, and returns a small status object. No secret value is read into a
+// response or written to the database. No audit table exists.
 // =============================================================================
 
 // --- provider write + test ---------------------------------------------------
@@ -478,14 +527,16 @@ export const updateProvider = createServerFn({ method: "POST" })
         providerId: z.string(),
         enabled: z.boolean().optional(),
         secretRef: z.string().max(200).nullable().optional(),
-        secretSource: z.enum(["cloudflare_env", "supabase_vault"]).optional(),
+        description: z.string().max(2000).optional(),
+        key: z.string().min(1).max(80).optional(),
+        name: z.string().min(1).max(120).optional(),
       })
       .parse(input),
   )
-  .handler(async ({ context, data }) => {
+  .handler(async ({ data }) => {
     const db = await adminClient();
     const { data: existing, error: readError } = await db
-      .from("providers")
+      .from("ai_providers")
       .select("id")
       .eq("id", data.providerId)
       .maybeSingle();
@@ -495,56 +546,34 @@ export const updateProvider = createServerFn({ method: "POST" })
     const patch: Record<string, unknown> = {};
     if (data.enabled !== undefined) patch["enabled"] = data.enabled;
     if (data.secretRef !== undefined) patch["secret_ref"] = data.secretRef?.trim() || null;
-    if (data.secretSource !== undefined) patch["secret_source"] = data.secretSource;
+    if (data.description !== undefined) patch["description"] = data.description;
+    if (data.key !== undefined) patch["key"] = data.key;
+    if (data.name !== undefined) patch["name"] = data.name;
 
-    const ops = await loadOps();
-    let result: "ok" | "error" = "ok";
-    let detail = "无变更";
     if (Object.keys(patch).length > 0) {
-      const { error } = await db.from("providers").update(patch).eq("id", data.providerId);
-      if (error) {
-        result = "error";
-        detail = error.message;
-      } else {
-        detail = Object.keys(patch).join(", ");
-      }
+      const { error } = await db.from("ai_providers").update(patch).eq("id", data.providerId);
+      if (error) throw new Error(error.message);
     }
-    await ops.recordAdminAction(db, {
-      actorUserId: context.userId,
-      action: "update_provider",
-      targetType: "provider",
-      targetId: data.providerId,
-      result,
-      detail,
-    });
-    if (result === "error") throw new Error(detail);
-    return { ok: true, changed: detail };
+    return { ok: true, changed: Object.keys(patch).join(", ") || "无变更" };
   });
 
 export const testProviderConnection = createServerFn({ method: "POST" })
   .middleware([requireAdmin])
   .inputValidator((input: unknown) => z.object({ providerId: z.string() }).parse(input))
-  .handler(async ({ context, data }) => {
+  .handler(async ({ data }) => {
     const db = await adminClient();
     const { data: provider, error } = await db
-      .from("providers")
-      .select("*")
+      .from("ai_providers")
+      .select("id, base_url, secret_ref")
       .eq("id", data.providerId)
       .maybeSingle();
     if (error) throw new Error(error.message);
     if (!provider) throw new Error("Provider 不存在");
 
-    const ops = await loadOps();
-    const result = await ops.testProvider(provider as unknown as Provider);
-    await ops.recordAdminAction(db, {
-      actorUserId: context.userId,
-      action: "test_provider_connection",
-      targetType: "provider",
-      targetId: data.providerId,
-      result: result.success ? "ok" : "error",
-      detail: result.message,
-    });
-    return result;
+    const ops = await import("@/lib/admin-ops.server");
+    return ops.testProvider(
+      provider as unknown as { base_url: string | null; secret_ref: string | null },
+    );
   });
 
 // --- model write -------------------------------------------------------------
@@ -555,20 +584,20 @@ export const updateModel = createServerFn({ method: "POST" })
     z
       .object({
         modelId: z.string(),
-        displayName: z.string().min(1).max(120).optional(),
-        modelKey: z.string().min(1).max(60).optional(),
-        upstreamId: z.string().min(1).max(160).optional(),
-        description: z.string().max(2000).optional(),
         enabled: z.boolean().optional(),
+        key: z.string().min(1).max(80).optional(),
+        name: z.string().min(1).max(120).optional(),
+        description: z.string().max(2000).optional(),
         capabilities: z.array(z.string().max(40)).max(20).optional(),
-        slots: z.array(z.string().max(40)).max(20).optional(),
+        providerKey: z.string().max(80).nullable().optional(),
+        sortOrder: z.number().int().optional(),
       })
       .parse(input),
   )
-  .handler(async ({ context, data }) => {
+  .handler(async ({ data }) => {
     const db = await adminClient();
     const { data: existing, error: readError } = await db
-      .from("models")
+      .from("ai_models")
       .select("id")
       .eq("id", data.modelId)
       .maybeSingle();
@@ -576,36 +605,19 @@ export const updateModel = createServerFn({ method: "POST" })
     if (!existing) throw new Error("模型不存在");
 
     const patch: Record<string, unknown> = {};
-    if (data.displayName !== undefined) patch["display_name"] = data.displayName;
-    if (data.modelKey !== undefined) patch["model_key"] = data.modelKey;
-    if (data.upstreamId !== undefined) patch["upstream_id"] = data.upstreamId;
-    if (data.description !== undefined) patch["description"] = data.description;
     if (data.enabled !== undefined) patch["enabled"] = data.enabled;
+    if (data.key !== undefined) patch["key"] = data.key;
+    if (data.name !== undefined) patch["name"] = data.name;
+    if (data.description !== undefined) patch["description"] = data.description;
     if (data.capabilities !== undefined) patch["capabilities"] = data.capabilities;
-    if (data.slots !== undefined) patch["slots"] = data.slots;
+    if (data.providerKey !== undefined) patch["provider_key"] = data.providerKey?.trim() || null;
+    if (data.sortOrder !== undefined) patch["sort_order"] = data.sortOrder;
 
-    const ops = await loadOps();
-    let result: "ok" | "error" = "ok";
-    let detail = "无变更";
     if (Object.keys(patch).length > 0) {
-      const { error } = await db.from("models").update(patch).eq("id", data.modelId);
-      if (error) {
-        result = "error";
-        detail = error.message;
-      } else {
-        detail = Object.keys(patch).join(", ");
-      }
+      const { error } = await db.from("ai_models").update(patch).eq("id", data.modelId);
+      if (error) throw new Error(error.message);
     }
-    await ops.recordAdminAction(db, {
-      actorUserId: context.userId,
-      action: "update_model",
-      targetType: "model",
-      targetId: data.modelId,
-      result,
-      detail,
-    });
-    if (result === "error") throw new Error(detail);
-    return { ok: true, changed: detail };
+    return { ok: true, changed: Object.keys(patch).join(", ") || "无变更" };
   });
 
 // --- workflow write + test ---------------------------------------------------
@@ -616,19 +628,20 @@ export const updateWorkflow = createServerFn({ method: "POST" })
     z
       .object({
         workflowId: z.string(),
-        label: z.string().min(1).max(80).optional(),
-        difyAppId: z.string().max(200).nullable().optional(),
-        appType: z.enum(["workflow", "chatflow"]).optional(),
-        secretRef: z.string().max(200).nullable().optional(),
-        secretSource: z.enum(["cloudflare_env", "supabase_vault"]).optional(),
         enabled: z.boolean().optional(),
+        key: z.string().min(1).max(80).optional(),
+        name: z.string().min(1).max(120).optional(),
+        description: z.string().max(2000).optional(),
+        secretRef: z.string().max(200).nullable().optional(),
+        providerKey: z.string().max(80).nullable().optional(),
+        sortOrder: z.number().int().optional(),
       })
       .parse(input),
   )
-  .handler(async ({ context, data }) => {
+  .handler(async ({ data }) => {
     const db = await adminClient();
     const { data: existing, error: readError } = await db
-      .from("workflows")
+      .from("ai_workflows")
       .select("id")
       .eq("id", data.workflowId)
       .maybeSingle();
@@ -636,132 +649,46 @@ export const updateWorkflow = createServerFn({ method: "POST" })
     if (!existing) throw new Error("Workflow 不存在");
 
     const patch: Record<string, unknown> = {};
-    if (data.label !== undefined) patch["label"] = data.label;
-    if (data.difyAppId !== undefined) patch["dify_app_id"] = data.difyAppId?.trim() || null;
-    if (data.appType !== undefined) patch["app_type"] = data.appType;
-    if (data.secretRef !== undefined) patch["secret_ref"] = data.secretRef?.trim() || null;
-    if (data.secretSource !== undefined) patch["secret_source"] = data.secretSource;
     if (data.enabled !== undefined) patch["enabled"] = data.enabled;
+    if (data.key !== undefined) patch["key"] = data.key;
+    if (data.name !== undefined) patch["name"] = data.name;
+    if (data.description !== undefined) patch["description"] = data.description;
+    if (data.secretRef !== undefined) patch["secret_ref"] = data.secretRef?.trim() || null;
+    if (data.providerKey !== undefined) patch["provider_key"] = data.providerKey?.trim() || null;
+    if (data.sortOrder !== undefined) patch["sort_order"] = data.sortOrder;
 
-    const ops = await loadOps();
-    let result: "ok" | "error" = "ok";
-    let detail = "无变更";
     if (Object.keys(patch).length > 0) {
-      const { error } = await db.from("workflows").update(patch).eq("id", data.workflowId);
-      if (error) {
-        result = "error";
-        detail = error.message;
-      } else {
-        detail = Object.keys(patch).join(", ");
-      }
+      const { error } = await db.from("ai_workflows").update(patch).eq("id", data.workflowId);
+      if (error) throw new Error(error.message);
     }
-    await ops.recordAdminAction(db, {
-      actorUserId: context.userId,
-      action: "update_workflow",
-      targetType: "workflow",
-      targetId: data.workflowId,
-      result,
-      detail,
-    });
-    if (result === "error") throw new Error(detail);
-    return { ok: true, changed: detail };
+    return { ok: true, changed: Object.keys(patch).join(", ") || "无变更" };
   });
 
 export const testWorkflowConnection = createServerFn({ method: "POST" })
   .middleware([requireAdmin])
   .inputValidator((input: unknown) => z.object({ workflowId: z.string() }).parse(input))
-  .handler(async ({ context, data }) => {
+  .handler(async ({ data }) => {
     const db = await adminClient();
     const { data: workflow, error } = await db
-      .from("workflows")
-      .select("*")
+      .from("ai_workflows")
+      .select("id, secret_ref, provider_key")
       .eq("id", data.workflowId)
       .maybeSingle();
     if (error) throw new Error(error.message);
     if (!workflow) throw new Error("Workflow 不存在");
 
-    const ops = await loadOps();
-    const result = await ops.testDifyWorkflow(workflow as unknown as Workflow);
-    await ops.recordAdminAction(db, {
-      actorUserId: context.userId,
-      action: "test_workflow_connection",
-      targetType: "workflow",
-      targetId: data.workflowId,
-      result: result.success ? "ok" : "error",
-      detail: result.message,
-    });
-    return result;
-  });
+    const row = workflow as unknown as { secret_ref: string | null; provider_key: string | null };
+    let provider: { base_url: string | null; secret_ref: string | null } | null = null;
+    if (row.provider_key) {
+      const pvRes = await db
+        .from("ai_providers")
+        .select("base_url, secret_ref")
+        .eq("key", row.provider_key)
+        .maybeSingle();
+      provider =
+        (pvRes.data as unknown as { base_url: string | null; secret_ref: string | null }) ?? null;
+    }
 
-// --- user quota --------------------------------------------------------------
-
-function emptyQuota(userId: string): QuotaInfo {
-  return {
-    user_id: userId,
-    period: "monthly",
-    token_limit: null,
-    token_used: 0,
-    cost_limit: null,
-    cost_used: 0,
-  };
-}
-
-export const getUserQuota = createServerFn({ method: "GET" })
-  .middleware([requireAdmin])
-  .inputValidator((input: unknown) => z.object({ userId: z.string() }).parse(input))
-  .handler(async ({ data }): Promise<QuotaInfo> => {
-    const db = await adminClient();
-    const { data: row, error } = await db
-      .from("user_quotas")
-      .select("*")
-      .eq("user_id", data.userId)
-      .maybeSingle();
-    if (error) throw new Error(error.message);
-    return (row as unknown as QuotaInfo) ?? emptyQuota(data.userId);
-  });
-
-export const setUserQuota = createServerFn({ method: "POST" })
-  .middleware([requireAdmin])
-  .inputValidator((input: unknown) =>
-    z
-      .object({
-        userId: z.string(),
-        tokenLimit: z.number().int().nonnegative().nullable().optional(),
-        costLimit: z.number().nonnegative().nullable().optional(),
-        period: z.enum(["daily", "weekly", "monthly"]).optional(),
-      })
-      .parse(input),
-  )
-  .handler(async ({ context, data }): Promise<QuotaInfo> => {
-    const db = await adminClient();
-    const { data: userRes, error: userError } = await db.auth.admin.getUserById(data.userId);
-    if (userError || !userRes?.user) throw new Error("用户不存在");
-
-    const patch: Record<string, unknown> = { user_id: data.userId };
-    if (data.tokenLimit !== undefined) patch["token_limit"] = data.tokenLimit;
-    if (data.costLimit !== undefined) patch["cost_limit"] = data.costLimit;
-    if (data.period !== undefined) patch["period"] = data.period;
-
-    const ops = await loadOps();
-    const { data: row, error } = await db
-      .from("user_quotas")
-      .upsert(patch, { onConflict: "user_id" })
-      .select("*")
-      .single();
-    const result: "ok" | "error" = error ? "error" : "ok";
-    await ops.recordAdminAction(db, {
-      actorUserId: context.userId,
-      action: "set_user_quota",
-      targetType: "user",
-      targetId: data.userId,
-      result,
-      detail:
-        result === "ok"
-          ? Object.keys(patch)
-              .filter((k) => k !== "user_id")
-              .join(", ")
-          : error?.message,
-    });
-    if (error) throw new Error(error.message);
-    return row as unknown as QuotaInfo;
+    const ops = await import("@/lib/admin-ops.server");
+    return ops.testDifyWorkflow({ secret_ref: row.secret_ref }, provider);
   });

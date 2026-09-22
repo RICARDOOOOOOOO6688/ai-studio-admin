@@ -1,115 +1,87 @@
-// Shared, client-safe types for the AI Studio control plane.
-// No secrets, no provider endpoints — just the shape of the config rows.
+// Shared, client-safe types for the authoritative ai_* control plane.
+// No secrets — only references and catalog metadata.
 
-export type Role = "admin" | "operator" | "editor" | "user";
+export type Role = "admin" | "user";
 
-export type SecretSource = "cloudflare_env" | "supabase_vault";
-
+/** public.ai_providers */
 export interface Provider {
   id: string;
-  slug: string;
+  key: string;
   name: string;
-  kind: string;
+  description: string;
   base_url: string | null;
   secret_ref: string | null;
-  secret_source: SecretSource;
   enabled: boolean;
-  sort_order: number;
   created_at: string;
   updated_at: string;
 }
 
+/** public.ai_models */
 export interface Model {
   id: string;
-  provider_id: string;
-  model_key: string;
-  display_name: string;
-  upstream_id: string;
+  key: string;
+  name: string;
   description: string;
   capabilities: string[];
-  slots: string[];
+  provider_key: string | null;
   enabled: boolean;
   sort_order: number;
   created_at: string;
   updated_at: string;
-}
-
-export interface ModelWithProvider extends Model {
-  provider: Pick<Provider, "id" | "name" | "slug" | "enabled" | "secret_ref"> | null;
-  /** enabled ≠ callable: a model is "provider_unavailable" when its Provider
-   *  is disabled or has no secret_ref. */
-  status: ModelStatus;
 }
 
 export type ModelStatus = "enabled" | "disabled" | "provider_unavailable";
 
+export interface ModelWithProvider extends Model {
+  provider: {
+    id: string;
+    key: string;
+    name: string;
+    enabled: boolean;
+    secret_ref: string | null;
+  } | null;
+  /** enabled ≠ callable; "provider_unavailable" when the provider is off / has no secret. */
+  status: ModelStatus;
+}
+
+/** public.ai_workflows */
 export interface Workflow {
   id: string;
   key: string;
-  label: string;
-  dify_app_id: string | null;
-  app_type: "workflow" | "chatflow";
-  secret_ref: string | null;
-  secret_source: SecretSource;
-  enabled: boolean;
-  sort_order: number;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface KnowledgeBase {
-  id: string;
   name: string;
-  scope: "global" | "project";
-  source: "dify_dataset" | "pgvector";
-  external_id: string | null;
   description: string;
+  secret_ref: string | null;
+  provider_key: string | null;
   enabled: boolean;
   sort_order: number;
   created_at: string;
   updated_at: string;
 }
 
-export interface ActivityEvent {
-  id: string;
-  type: string;
-  title: string;
-  actor_user_id: string | null;
-  metadata: Record<string, string | number | boolean | null>;
-  created_at: string;
+export interface WorkflowWithProvider extends Workflow {
+  provider: {
+    id: string;
+    key: string;
+    name: string;
+    base_url: string | null;
+    enabled: boolean;
+    secret_ref: string | null;
+  } | null;
+  /** enabled + provider enabled + base_url + a resolvable secret_ref. */
+  connected: boolean;
 }
 
+/** public.usage_events — only the confirmed columns. */
 export interface UsageEvent {
   id: string;
   user_id: string;
-  capability: string;
-  model_key: string | null;
+  project_id: string | null;
   workflow_key: string | null;
-  tokens_in: number;
-  tokens_out: number;
-  cost: number;
-  latency_ms: number | null;
-  status: string;
+  model_key: string | null;
+  provider_key: string | null;
+  input_tokens: number;
+  output_tokens: number;
   created_at: string;
-}
-
-export interface UserQuota {
-  user_id: string;
-  period: string;
-  token_limit: number | null;
-  token_used: number;
-  cost_limit: number | null;
-  cost_used: number;
-  updated_at: string;
-}
-
-export interface QuotaInfo {
-  user_id: string;
-  period: string;
-  token_limit: number | null;
-  token_used: number;
-  cost_limit: number | null;
-  cost_used: number;
 }
 
 export interface AdminUser {
@@ -118,9 +90,6 @@ export interface AdminUser {
   role: Role;
   created_at: string | null;
   last_sign_in_at: string | null;
-  token_used: number;
-  token_limit: number | null;
-  cost_used: number;
 }
 
 export const CAPABILITY_LABELS: Record<string, string> = {
@@ -128,14 +97,6 @@ export const CAPABILITY_LABELS: Record<string, string> = {
   reasoning: "Reasoning",
   vision: "Vision",
   tool_calling: "Tool Calling",
-};
-
-export const SLOT_LABELS: Record<string, string> = {
-  navigator: "Project Navigator",
-  research: "Research",
-  product: "Product",
-  architecture: "Architecture",
-  build: "Build",
 };
 
 export type HealthState = "ok" | "warn" | "down" | "unknown";
@@ -148,6 +109,7 @@ export interface HealthItem {
 }
 
 export interface CapabilitySummary {
+  providers: { total: number; enabled: number };
   models: { total: number; enabled: number; configured: number };
   workflows: { total: number; connected: number; pending: number };
 }
@@ -156,4 +118,11 @@ export interface AlertItem {
   severity: "warning" | "error";
   title: string;
   detail: string;
+}
+
+export interface UsageSummary {
+  events: number;
+  totalInput: number;
+  totalOutput: number;
+  byWorkflow: { workflowKey: string; input: number; output: number; events: number }[];
 }
