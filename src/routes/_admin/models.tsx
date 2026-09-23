@@ -2,7 +2,7 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { toast } from "sonner";
-import { Loader2, Pencil } from "lucide-react";
+import { Loader2, Pencil, Plus, Trash2 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -33,7 +33,13 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { listModels, listProviders, updateModel } from "@/lib/admin.functions";
+import {
+  createModel,
+  deleteModel,
+  listModels,
+  listProviders,
+  updateModel,
+} from "@/lib/admin.functions";
 import { CAPABILITY_LABELS, type ModelWithProvider } from "@/lib/control-plane";
 
 export const Route = createFileRoute("/_admin/models")({
@@ -63,32 +69,46 @@ function toggle(list: string[], value: string): string[] {
   return list.includes(value) ? list.filter((v) => v !== value) : [...list, value];
 }
 
-function ModelEditDialog({ model, onClose }: { model: ModelWithProvider; onClose: () => void }) {
+function ModelEditDialog({
+  model,
+  onClose,
+}: {
+  model: ModelWithProvider | null;
+  onClose: () => void;
+}) {
   const queryClient = useQueryClient();
   const { data: providers = [] } = useQuery({
     queryKey: ["providers"],
     queryFn: () => listProviders(),
   });
-  const [key, setKey] = useState(model.key);
-  const [name, setName] = useState(model.name);
-  const [description, setDescription] = useState(model.description);
-  const [enabled, setEnabled] = useState(model.enabled);
-  const [capabilities, setCapabilities] = useState<string[]>(model.capabilities);
-  const [providerKey, setProviderKey] = useState(model.provider_key ?? NO_PROVIDER);
+  const [key, setKey] = useState(model?.key ?? "");
+  const [name, setName] = useState(model?.name ?? "");
+  const [description, setDescription] = useState(model?.description ?? "");
+  const [enabled, setEnabled] = useState(model?.enabled ?? false);
+  const [capabilities, setCapabilities] = useState<string[]>(model?.capabilities ?? []);
+  const [providerKey, setProviderKey] = useState(model?.provider_key ?? NO_PROVIDER);
 
   const mutation = useMutation({
-    mutationFn: () =>
-      updateModel({
-        data: {
-          modelId: model.id,
-          key,
-          name,
-          description,
-          enabled,
-          capabilities,
-          providerKey: providerKey === NO_PROVIDER ? null : providerKey,
-        },
-      }),
+    mutationFn: async () => {
+      const provider = providerKey === NO_PROVIDER ? null : providerKey;
+      if (model) {
+        await updateModel({
+          data: {
+            modelId: model.id,
+            key,
+            name,
+            description,
+            enabled,
+            capabilities,
+            providerKey: provider,
+          },
+        });
+      } else {
+        await createModel({
+          data: { key, name, description, enabled, capabilities, providerKey: provider },
+        });
+      }
+    },
     onSuccess: () => {
       toast.success("已保存");
       queryClient.invalidateQueries();
@@ -101,14 +121,17 @@ function ModelEditDialog({ model, onClose }: { model: ModelWithProvider; onClose
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="max-h-[85vh] overflow-y-auto">
         <DialogHeader>
-          <DialogTitle>编辑 {model.name}</DialogTitle>
-          <DialogDescription>模型是目录条目，不参与实际执行。</DialogDescription>
+          <DialogTitle>{model ? `编辑 ${model.name}` : "新建 Model"}</DialogTitle>
+          <DialogDescription>
+            Direct Model 会把 <code className="font-mono">Key</code> 当作发给 API 的 model 值（如
+            deepseek-chat）。
+          </DialogDescription>
         </DialogHeader>
 
         <div className="space-y-4">
           <div className="grid gap-3 sm:grid-cols-2">
             <div className="space-y-2">
-              <Label htmlFor="key">Key</Label>
+              <Label htmlFor="key">Key（= API model 值）</Label>
               <Input
                 id="key"
                 value={key}
@@ -117,7 +140,7 @@ function ModelEditDialog({ model, onClose }: { model: ModelWithProvider; onClose
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="name">名称</Label>
+              <Label htmlFor="name">显示名称</Label>
               <Input id="name" value={name} onChange={(e) => setName(e.target.value)} />
             </div>
           </div>
@@ -169,7 +192,10 @@ function ModelEditDialog({ model, onClose }: { model: ModelWithProvider; onClose
           <Button variant="outline" onClick={onClose}>
             取消
           </Button>
-          <Button onClick={() => mutation.mutate()} disabled={mutation.isPending}>
+          <Button
+            onClick={() => mutation.mutate()}
+            disabled={mutation.isPending || !key.trim() || !name.trim()}
+          >
             {mutation.isPending && <Loader2 className="animate-spin" />}
             保存
           </Button>
@@ -182,6 +208,7 @@ function ModelEditDialog({ model, onClose }: { model: ModelWithProvider; onClose
 function ModelsPage() {
   const queryClient = useQueryClient();
   const [editing, setEditing] = useState<ModelWithProvider | null>(null);
+  const [creating, setCreating] = useState(false);
 
   const { data: models = [], isLoading } = useQuery({
     queryKey: ["models"],
@@ -197,13 +224,27 @@ function ModelsPage() {
     onError: (e) => toast.error(e instanceof Error ? e.message : "更新失败"),
   });
 
+  const remove = useMutation({
+    mutationFn: (modelId: string) => deleteModel({ data: { modelId } }),
+    onSuccess: () => {
+      toast.success("已删除");
+      queryClient.invalidateQueries();
+    },
+    onError: (e) => toast.error(e instanceof Error ? e.message : "删除失败"),
+  });
+
   return (
     <div className="mx-auto w-full max-w-5xl space-y-5">
-      <div>
-        <h1 className="text-xl font-semibold tracking-tight">Models</h1>
-        <p className="mt-1 text-sm text-muted-foreground">
-          模型目录，通过 provider_key 归属；当前不参与 Dify 执行。
-        </p>
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h1 className="text-xl font-semibold tracking-tight">Models</h1>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Direct Model 用的模型；Key 即发给 API 的 model 值，通过 provider_key 归属。
+          </p>
+        </div>
+        <Button size="sm" onClick={() => setCreating(true)}>
+          <Plus /> 新建 Model
+        </Button>
       </div>
 
       <div className="rounded-xl border border-border bg-card">
@@ -264,10 +305,21 @@ function ModelsPage() {
                   />
                 </TableCell>
                 <TableCell className="text-right">
-                  <Button variant="ghost" size="sm" onClick={() => setEditing(m)}>
-                    <Pencil />
-                    编辑
-                  </Button>
+                  <div className="flex justify-end gap-1">
+                    <Button variant="ghost" size="sm" onClick={() => setEditing(m)}>
+                      <Pencil />
+                      编辑
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => remove.mutate(m.id)}
+                      disabled={remove.isPending}
+                    >
+                      <Trash2 />
+                      删除
+                    </Button>
+                  </div>
                 </TableCell>
               </TableRow>
             ))}
@@ -275,6 +327,7 @@ function ModelsPage() {
         </Table>
       </div>
 
+      {creating && <ModelEditDialog model={null} onClose={() => setCreating(false)} />}
       {editing && <ModelEditDialog model={editing} onClose={() => setEditing(null)} />}
     </div>
   );

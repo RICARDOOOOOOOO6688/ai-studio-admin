@@ -531,6 +531,7 @@ export const updateProvider = createServerFn({ method: "POST" })
         description: z.string().max(2000).optional(),
         key: z.string().min(1).max(80).optional(),
         name: z.string().min(1).max(120).optional(),
+        baseUrl: z.string().max(500).nullable().optional(),
       })
       .parse(input),
   )
@@ -550,6 +551,7 @@ export const updateProvider = createServerFn({ method: "POST" })
     if (data.description !== undefined) patch["description"] = data.description;
     if (data.key !== undefined) patch["key"] = data.key;
     if (data.name !== undefined) patch["name"] = data.name;
+    if (data.baseUrl !== undefined) patch["base_url"] = data.baseUrl?.trim() || null;
 
     if (Object.keys(patch).length > 0) {
       const { error } = await db.from("ai_providers").update(patch).eq("id", data.providerId);
@@ -788,6 +790,123 @@ export const deleteSkill = createServerFn({ method: "POST" })
   .handler(async ({ data }) => {
     const db = await adminClient();
     const { error } = await db.from("ai_skills").delete().eq("id", data.skillId);
+    if (error) throw new Error(error.message);
+    return { ok: true };
+  });
+
+// =============================================================================
+// Provider / Model create + delete (Direct Model API onboarding)
+// =============================================================================
+
+export const createProvider = createServerFn({ method: "POST" })
+  .middleware([requireAdmin])
+  .inputValidator((input: unknown) =>
+    z
+      .object({
+        key: z.string().min(1).max(80),
+        name: z.string().min(1).max(120),
+        description: z.string().max(2000).optional(),
+        baseUrl: z.string().max(500).nullable().optional(),
+        secretRef: z.string().max(200).nullable().optional(),
+        enabled: z.boolean().optional(),
+      })
+      .parse(input),
+  )
+  .handler(async ({ data }): Promise<Provider> => {
+    const db = await adminClient();
+    const { data: row, error } = await db
+      .from("ai_providers")
+      .insert({
+        key: data.key.trim(),
+        name: data.name.trim(),
+        description: data.description ?? "",
+        base_url: data.baseUrl?.trim() || null,
+        secret_ref: data.secretRef?.trim() || null,
+        enabled: data.enabled ?? false,
+      })
+      .select("*")
+      .single();
+    if (error) throw new Error(error.message);
+    return row as unknown as Provider;
+  });
+
+export const deleteProvider = createServerFn({ method: "POST" })
+  .middleware([requireAdmin])
+  .inputValidator((input: unknown) => z.object({ providerId: z.string() }).parse(input))
+  .handler(async ({ data }) => {
+    const db = await adminClient();
+    const { data: existing, error: readError } = await db
+      .from("ai_providers")
+      .select("id, key")
+      .eq("id", data.providerId)
+      .maybeSingle();
+    if (readError) throw new Error(readError.message);
+    if (!existing) throw new Error("Provider 不存在");
+
+    const key = (existing as { key: string }).key;
+    const [modelsRes, workflowsRes] = await Promise.all([
+      db.from("ai_models").select("id").eq("provider_key", key),
+      db.from("ai_workflows").select("id").eq("provider_key", key),
+    ]);
+    const mc = (modelsRes.data ?? []).length;
+    const wc = (workflowsRes.data ?? []).length;
+    if (mc > 0 || wc > 0) {
+      throw new Error(`仍有 ${mc} 个模型 / ${wc} 个工作流引用该 Provider，请先处理`);
+    }
+
+    const { error } = await db.from("ai_providers").delete().eq("id", data.providerId);
+    if (error) throw new Error(error.message);
+    return { ok: true };
+  });
+
+export const createModel = createServerFn({ method: "POST" })
+  .middleware([requireAdmin])
+  .inputValidator((input: unknown) =>
+    z
+      .object({
+        key: z.string().min(1).max(120),
+        name: z.string().min(1).max(120),
+        description: z.string().max(2000).optional(),
+        capabilities: z.array(z.string().max(40)).max(20).optional(),
+        providerKey: z.string().max(80).nullable().optional(),
+        enabled: z.boolean().optional(),
+        sortOrder: z.number().int().optional(),
+      })
+      .parse(input),
+  )
+  .handler(async ({ data }): Promise<Model> => {
+    const db = await adminClient();
+    if (data.providerKey) {
+      const { data: provider } = await db
+        .from("ai_providers")
+        .select("id")
+        .eq("key", data.providerKey)
+        .maybeSingle();
+      if (!provider) throw new Error("指定的 Provider 不存在");
+    }
+    const { data: row, error } = await db
+      .from("ai_models")
+      .insert({
+        key: data.key.trim(),
+        name: data.name.trim(),
+        description: data.description ?? "",
+        capabilities: data.capabilities ?? [],
+        provider_key: data.providerKey || null,
+        enabled: data.enabled ?? false,
+        sort_order: data.sortOrder ?? 0,
+      })
+      .select("*")
+      .single();
+    if (error) throw new Error(error.message);
+    return row as unknown as Model;
+  });
+
+export const deleteModel = createServerFn({ method: "POST" })
+  .middleware([requireAdmin])
+  .inputValidator((input: unknown) => z.object({ modelId: z.string() }).parse(input))
+  .handler(async ({ data }) => {
+    const db = await adminClient();
+    const { error } = await db.from("ai_models").delete().eq("id", data.modelId);
     if (error) throw new Error(error.message);
     return { ok: true };
   });

@@ -30,6 +30,7 @@ function ProviderDetailPage() {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [secretRef, setSecretRef] = useState("");
+  const [baseUrl, setBaseUrl] = useState("");
   const [enabled, setEnabled] = useState(false);
 
   useEffect(() => {
@@ -38,13 +39,22 @@ function ProviderDetailPage() {
     setName(provider.name);
     setDescription(provider.description);
     setSecretRef(provider.secret_ref ?? "");
+    setBaseUrl(provider.base_url ?? "");
     setEnabled(provider.enabled);
   }, [provider]);
 
   const save = useMutation({
     mutationFn: () =>
       updateProvider({
-        data: { providerId, key, name, description, secretRef: secretRef.trim() || null, enabled },
+        data: {
+          providerId,
+          key,
+          name,
+          description,
+          secretRef: secretRef.trim() || null,
+          baseUrl: baseUrl.trim() || null,
+          enabled,
+        },
       }),
     onSuccess: () => {
       toast.success("已保存");
@@ -98,9 +108,14 @@ function ProviderDetailPage() {
             </div>
           </div>
           <div className="space-y-2">
-            <Label>Base URL</Label>
-            <Input value={provider?.base_url ?? ""} readOnly className="font-mono text-sm" />
-            <p className="text-xs text-muted-foreground">base_url 由数据库提供，此处只读展示。</p>
+            <Label htmlFor="baseUrl">Base URL</Label>
+            <Input
+              id="baseUrl"
+              value={baseUrl}
+              onChange={(e) => setBaseUrl(e.target.value)}
+              placeholder="https://api.deepseek.com/v1"
+              className="font-mono text-sm"
+            />
           </div>
           <div className="space-y-2">
             <Label htmlFor="description">描述</Label>
