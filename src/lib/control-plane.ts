@@ -71,6 +71,19 @@ export interface WorkflowWithProvider extends Workflow {
   connected: boolean;
 }
 
+/** public.ai_skills — pluggable instructions for the Direct Model path. */
+export interface Skill {
+  id: string;
+  key: string;
+  name: string;
+  description: string;
+  instructions: string;
+  version: string;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
 /** public.usage_events — only the confirmed columns. */
 export interface UsageEvent {
   id: string;

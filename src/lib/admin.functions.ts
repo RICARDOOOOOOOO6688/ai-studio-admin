@@ -17,6 +17,7 @@ import type {
   ModelWithProvider,
   Provider,
   Role,
+  Skill,
   UsageEvent,
   UsageSummary,
   Workflow,
@@ -691,4 +692,102 @@ export const testWorkflowConnection = createServerFn({ method: "POST" })
 
     const ops = await import("@/lib/admin-ops.server");
     return ops.testDifyWorkflow({ secret_ref: row.secret_ref }, provider);
+  });
+
+// =============================================================================
+// Skills (ai_skills) — Direct Model path only. Admin-managed catalog.
+// =============================================================================
+
+export const listSkills = createServerFn({ method: "GET" })
+  .middleware([requireAdmin])
+  .handler(async (): Promise<Skill[]> => {
+    const db = await adminClient();
+    const { data, error } = await db
+      .from("ai_skills")
+      .select("*")
+      .order("name", { ascending: true });
+    if (error) throw new Error(error.message);
+    return (data ?? []) as unknown as Skill[];
+  });
+
+export const createSkill = createServerFn({ method: "POST" })
+  .middleware([requireAdmin])
+  .inputValidator((input: unknown) =>
+    z
+      .object({
+        key: z.string().min(1).max(80),
+        name: z.string().min(1).max(120),
+        description: z.string().max(2000).optional(),
+        instructions: z.string().max(20000).optional(),
+        version: z.string().max(40).optional(),
+        enabled: z.boolean().optional(),
+      })
+      .parse(input),
+  )
+  .handler(async ({ data }): Promise<Skill> => {
+    const db = await adminClient();
+    const { data: row, error } = await db
+      .from("ai_skills")
+      .insert({
+        key: data.key.trim(),
+        name: data.name.trim(),
+        description: data.description ?? "",
+        instructions: data.instructions ?? "",
+        version: data.version ?? "1.0.0",
+        enabled: data.enabled ?? false,
+      })
+      .select("*")
+      .single();
+    if (error) throw new Error(error.message);
+    return row as unknown as Skill;
+  });
+
+export const updateSkill = createServerFn({ method: "POST" })
+  .middleware([requireAdmin])
+  .inputValidator((input: unknown) =>
+    z
+      .object({
+        skillId: z.string(),
+        key: z.string().min(1).max(80).optional(),
+        name: z.string().min(1).max(120).optional(),
+        description: z.string().max(2000).optional(),
+        instructions: z.string().max(20000).optional(),
+        version: z.string().max(40).optional(),
+        enabled: z.boolean().optional(),
+      })
+      .parse(input),
+  )
+  .handler(async ({ data }) => {
+    const db = await adminClient();
+    const { data: existing, error: readError } = await db
+      .from("ai_skills")
+      .select("id")
+      .eq("id", data.skillId)
+      .maybeSingle();
+    if (readError) throw new Error(readError.message);
+    if (!existing) throw new Error("Skill 不存在");
+
+    const patch: Record<string, unknown> = {};
+    if (data.key !== undefined) patch["key"] = data.key.trim();
+    if (data.name !== undefined) patch["name"] = data.name.trim();
+    if (data.description !== undefined) patch["description"] = data.description;
+    if (data.instructions !== undefined) patch["instructions"] = data.instructions;
+    if (data.version !== undefined) patch["version"] = data.version.trim();
+    if (data.enabled !== undefined) patch["enabled"] = data.enabled;
+
+    if (Object.keys(patch).length > 0) {
+      const { error } = await db.from("ai_skills").update(patch).eq("id", data.skillId);
+      if (error) throw new Error(error.message);
+    }
+    return { ok: true, changed: Object.keys(patch).join(", ") || "无变更" };
+  });
+
+export const deleteSkill = createServerFn({ method: "POST" })
+  .middleware([requireAdmin])
+  .inputValidator((input: unknown) => z.object({ skillId: z.string() }).parse(input))
+  .handler(async ({ data }) => {
+    const db = await adminClient();
+    const { error } = await db.from("ai_skills").delete().eq("id", data.skillId);
+    if (error) throw new Error(error.message);
+    return { ok: true };
   });

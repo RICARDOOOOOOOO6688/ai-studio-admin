@@ -1,6 +1,15 @@
 import { Link, useNavigate } from "@tanstack/react-router";
 import type { ReactNode } from "react";
-import { Boxes, Gauge, LayoutDashboard, LogOut, Server, Users, Workflow } from "lucide-react";
+import {
+  Boxes,
+  Gauge,
+  LayoutDashboard,
+  LogOut,
+  Server,
+  Users,
+  Wand2,
+  Workflow,
+} from "lucide-react";
 
 import { supabase } from "@/integrations/supabase/client";
 import logo from "@/assets/logo.png";
@@ -10,6 +19,7 @@ const NAV = [
   { to: "/providers", label: "Providers", icon: Server, exact: false },
   { to: "/models", label: "Models", icon: Boxes, exact: false },
   { to: "/workflows", label: "Workflows", icon: Workflow, exact: false },
+  { to: "/skills", label: "Skills", icon: Wand2, exact: false },
   { to: "/users", label: "用户", icon: Users, exact: false },
   { to: "/usage", label: "用量", icon: Gauge, exact: false },
 ] as const;

@@ -14,6 +14,7 @@ import { Route as AuthRouteImport } from './routes/auth'
 import { Route as AdminIndexRouteImport } from './routes/_admin/index'
 import { Route as AdminModelsRouteImport } from './routes/_admin/models'
 import { Route as AdminProvidersRouteImport } from './routes/_admin/providers'
+import { Route as AdminSkillsRouteImport } from './routes/_admin/skills'
 import { Route as AdminUsageRouteImport } from './routes/_admin/usage'
 import { Route as AdminUsersRouteImport } from './routes/_admin/users'
 import { Route as AdminWorkflowsRouteImport } from './routes/_admin/workflows'
@@ -42,6 +43,11 @@ const AdminModelsRoute = AdminModelsRouteImport.update({
 const AdminProvidersRoute = AdminProvidersRouteImport.update({
   id: '/providers',
   path: '/providers',
+  getParentRoute: () => AdminRouteRoute,
+} as any)
+const AdminSkillsRoute = AdminSkillsRouteImport.update({
+  id: '/skills',
+  path: '/skills',
   getParentRoute: () => AdminRouteRoute,
 } as any)
 const AdminUsageRoute = AdminUsageRouteImport.update({
@@ -76,6 +82,7 @@ export interface FileRoutesByFullPath {
   '/auth': typeof AuthRoute
   '/models': typeof AdminModelsRouteWithChildren
   '/providers': typeof AdminProvidersRouteWithChildren
+  '/skills': typeof AdminSkillsRoute
   '/usage': typeof AdminUsageRoute
   '/users': typeof AdminUsersRoute
   '/workflows': typeof AdminWorkflowsRoute
@@ -86,6 +93,7 @@ export interface FileRoutesByTo {
   '/auth': typeof AuthRoute
   '/models': typeof AdminModelsRouteWithChildren
   '/providers': typeof AdminProvidersRouteWithChildren
+  '/skills': typeof AdminSkillsRoute
   '/usage': typeof AdminUsageRoute
   '/users': typeof AdminUsersRoute
   '/workflows': typeof AdminWorkflowsRoute
@@ -99,6 +107,7 @@ export interface FileRoutesById {
   '/auth': typeof AuthRoute
   '/_admin/models': typeof AdminModelsRouteWithChildren
   '/_admin/providers': typeof AdminProvidersRouteWithChildren
+  '/_admin/skills': typeof AdminSkillsRoute
   '/_admin/usage': typeof AdminUsageRoute
   '/_admin/users': typeof AdminUsersRoute
   '/_admin/workflows': typeof AdminWorkflowsRoute
@@ -113,6 +122,7 @@ export interface FileRouteTypes {
     | '/auth'
     | '/models'
     | '/providers'
+    | '/skills'
     | '/usage'
     | '/users'
     | '/workflows'
@@ -123,6 +133,7 @@ export interface FileRouteTypes {
     | '/auth'
     | '/models'
     | '/providers'
+    | '/skills'
     | '/usage'
     | '/users'
     | '/workflows'
@@ -135,6 +146,7 @@ export interface FileRouteTypes {
     | '/auth'
     | '/_admin/models'
     | '/_admin/providers'
+    | '/_admin/skills'
     | '/_admin/usage'
     | '/_admin/users'
     | '/_admin/workflows'
@@ -183,6 +195,13 @@ declare module '@tanstack/react-router' {
       path: '/providers'
       fullPath: '/providers'
       preLoaderRoute: typeof AdminProvidersRouteImport
+      parentRoute: typeof AdminRouteRoute
+    }
+    '/_admin/skills': {
+      id: '/_admin/skills'
+      path: '/skills'
+      fullPath: '/skills'
+      preLoaderRoute: typeof AdminSkillsRouteImport
       parentRoute: typeof AdminRouteRoute
     }
     '/_admin/usage': {
@@ -250,6 +269,7 @@ const AdminProvidersRouteWithChildren = AdminProvidersRoute._addFileChildren(
 interface AdminRouteRouteChildren {
   AdminModelsRoute: typeof AdminModelsRouteWithChildren
   AdminProvidersRoute: typeof AdminProvidersRouteWithChildren
+  AdminSkillsRoute: typeof AdminSkillsRoute
   AdminUsageRoute: typeof AdminUsageRoute
   AdminUsersRoute: typeof AdminUsersRoute
   AdminWorkflowsRoute: typeof AdminWorkflowsRoute
@@ -259,6 +279,7 @@ interface AdminRouteRouteChildren {
 const AdminRouteRouteChildren: AdminRouteRouteChildren = {
   AdminModelsRoute: AdminModelsRouteWithChildren,
   AdminProvidersRoute: AdminProvidersRouteWithChildren,
+  AdminSkillsRoute: AdminSkillsRoute,
   AdminUsageRoute: AdminUsageRoute,
   AdminUsersRoute: AdminUsersRoute,
   AdminWorkflowsRoute: AdminWorkflowsRoute,
